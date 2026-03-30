@@ -49,3 +49,7 @@ nix build
 # manually (set PKG_CONFIG_PATH to your HDF5 installation)
 PKG_CONFIG_PATH=/path/to/hdf5/lib/pkgconfig cargo build --release
 ```
+
+# Vibe coded house plant software
+
+This is meant to just handle my very specific use case for now.
