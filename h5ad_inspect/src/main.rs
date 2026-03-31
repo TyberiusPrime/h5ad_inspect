@@ -8,8 +8,16 @@ fn main() {
         process::exit(1);
     }
 
-    let filename = &args[1];
-    let section = args[2].as_str();
+    let sections = ["obs", "var", "uns", "obsm", "layers", "obs_index", "var_index"];
+    let section_arg = args[1..].iter().find(|a| sections.contains(&a.as_str()));
+    let section = match section_arg {
+        Some(s) => s.as_str(),
+        None => {
+            eprintln!("Error: section must be one of obs, var, uns, obsm, layers, obs_index, var_index");
+            process::exit(1);
+        }
+    };
+    let filename = args[1..].iter().find(|a| a.as_str() != section).unwrap();
 
     let file = match hdf5_metno::File::open(filename) {
         Ok(f) => f,
