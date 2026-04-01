@@ -102,7 +102,7 @@
 
         devShell = pkgs.mkShell {
           shellHook = ''
-            export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+            #export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
           '';
           nativeBuildInputs = [
             pkgs.bacon
