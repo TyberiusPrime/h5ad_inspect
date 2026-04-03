@@ -46,6 +46,8 @@ name = "h5ad_inspect"
 version = "0.1.0"
 dependencies = [
  "hdf5-metno",
+ "hdf5-metno-sys",
+ "ndarray",
 ]
 
 [[package]]
