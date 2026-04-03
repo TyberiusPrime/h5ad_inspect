@@ -35,13 +35,18 @@
         };
       in
       rec {
-        packages.h5ad-inspect = naersk-lib.buildPackage {
+        packages.h5ad-inspect = (naersk-lib.buildPackage {
           pname = "h5ad-inspect";
           root = ./h5ad_inspect;
           nativeBuildInputs = with pkgs; [ pkg-config ];
           buildInputs = with pkgs; [ hdf5 ];
           release = true;
           CARGO_PROFILE_RELEASE_debug = "0";
+        }).overrideAttrs {
+          postInstall = ''
+            install -Dm644 ${./h5ad_inspect/completions/h5ad-inspect.fish} \
+              $out/share/fish/vendor_completions.d/h5ad-inspect.fish
+          '';
         };
 
         packages.h5ad-inspect_other_linux =

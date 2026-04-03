@@ -691,28 +691,45 @@ fn main() {
     // "export" and the filename may appear in any order; sub-cmd and name follow export.
     if let Some(export_pos) = args[1..].iter().position(|a| a == "export") {
         let export_pos = export_pos + 1; // index into args
-        if export_pos + 2 >= args.len() {
+        if export_pos + 1 >= args.len() {
             eprintln!(
-                "Usage: h5ad-inspect <filename> export obs|var|row|column <name>"
+                "Usage: h5ad-inspect <filename> export obs_index|var_index"
+            );
+            eprintln!(
+                "       h5ad-inspect <filename> export obs|var|row|column <name>"
             );
             process::exit(1);
         }
         let sub_cmd = args[export_pos + 1].as_str();
-        let name = args[export_pos + 2].as_str();
-        // filename is whichever arg in args[1..] is not at export_pos, export_pos+1, export_pos+2
+
+        // obs_index / var_index take no <name> argument.
+        let no_name_cmds = ["obs_index", "var_index"];
+        let needs_name = !no_name_cmds.contains(&sub_cmd);
+
+        if needs_name && export_pos + 2 >= args.len() {
+            eprintln!("Error: export {} requires a <name> argument", sub_cmd);
+            process::exit(1);
+        }
+
+        let name = if needs_name {
+            args[export_pos + 2].as_str()
+        } else {
+            ""
+        };
+
+        let name_slots = if needs_name { 3 } else { 2 };
+        // filename is the arg in args[1..] not consumed by export_pos..export_pos+name_slots
         let filename = args[1..]
             .iter()
             .enumerate()
             .filter(|(i, _)| {
                 let abs = i + 1;
-                abs != export_pos && abs != export_pos + 1 && abs != export_pos + 2
+                abs < export_pos || abs >= export_pos + name_slots
             })
             .map(|(_, a)| a.as_str())
             .next()
             .unwrap_or_else(|| {
-                eprintln!(
-                    "Usage: h5ad-inspect <filename> export obs|var|row|column <name>"
-                );
+                eprintln!("Error: could not determine filename");
                 process::exit(1);
             });
 
@@ -722,12 +739,24 @@ fn main() {
         });
 
         match sub_cmd {
+            "obs_index" => {
+                for v in read_group_index(&file, "obs") {
+                    println!("{}", v);
+                }
+            }
+            "var_index" => {
+                for v in read_group_index(&file, "var") {
+                    println!("{}", v);
+                }
+            }
             "obs" => export_obs_var_column(&file, "obs", name),
             "var" => export_obs_var_column(&file, "var", name),
             "row" => export_x_row(&file, name),
             "column" => export_x_column(&file, name),
             _ => {
-                eprintln!("Error: export subcommand must be obs, var, row, or column");
+                eprintln!(
+                    "Error: export subcommand must be obs_index, var_index, obs, var, row, or column"
+                );
                 process::exit(1);
             }
         }
