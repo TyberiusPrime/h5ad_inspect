@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::ffi::CString;
 use std::process;
@@ -64,54 +65,68 @@ fn find_index_position(index: &[String], value: &str) -> usize {
         .unwrap_or_else(|| die(&format!("'{}' not found in index", value)))
 }
 
-// Print each element of a typed 1-D dataset as a newline-separated string.
-fn print_dataset_values(ds: &hdf5_metno::Dataset) {
+type StringIter = Box<dyn Iterator<Item = String>>;
+
+// Lazy iterator over the string representations of a typed 1-D dataset.
+fn dataset_values(ds: &hdf5_metno::Dataset) -> StringIter {
     let desc = ds
         .dtype()
         .and_then(|d| d.to_descriptor())
         .unwrap_or_else(|e| die(&format!("dtype: {}", e)));
-    macro_rules! print_typed {
-        ($T:ty) => {{
-            for v in ds
-                .read_1d::<$T>()
-                .unwrap_or_else(|e| die(&format!("read: {}", e)))
-                .iter()
-            {
-                println!("{}", v);
-            }
-        }};
+    macro_rules! iter_typed {
+        ($T:ty) => {
+            Box::new(
+                ds.read_1d::<$T>()
+                    .unwrap_or_else(|e| die(&format!("read: {}", e)))
+                    .into_iter()
+                    .map(|v| format!("{}", v)),
+            )
+        };
     }
     match desc {
-        TypeDescriptor::Integer(IntSize::U1) => print_typed!(i8),
-        TypeDescriptor::Integer(IntSize::U2) => print_typed!(i16),
-        TypeDescriptor::Integer(IntSize::U4) => print_typed!(i32),
-        TypeDescriptor::Integer(IntSize::U8) => print_typed!(i64),
-        TypeDescriptor::Unsigned(IntSize::U1) => print_typed!(u8),
-        TypeDescriptor::Unsigned(IntSize::U2) => print_typed!(u16),
-        TypeDescriptor::Unsigned(IntSize::U4) => print_typed!(u32),
-        TypeDescriptor::Unsigned(IntSize::U8) => print_typed!(u64),
-        TypeDescriptor::Float(FloatSize::U4) => print_typed!(f32),
-        TypeDescriptor::Float(FloatSize::U8) => print_typed!(f64),
-        TypeDescriptor::Boolean => print_typed!(bool),
-        TypeDescriptor::VarLenUnicode => {
-            for v in ds
-                .read_1d::<hdf5_metno::types::VarLenUnicode>()
+        TypeDescriptor::Integer(IntSize::U1) => iter_typed!(i8),
+        TypeDescriptor::Integer(IntSize::U2) => iter_typed!(i16),
+        TypeDescriptor::Integer(IntSize::U4) => iter_typed!(i32),
+        TypeDescriptor::Integer(IntSize::U8) => iter_typed!(i64),
+        TypeDescriptor::Unsigned(IntSize::U1) => iter_typed!(u8),
+        TypeDescriptor::Unsigned(IntSize::U2) => iter_typed!(u16),
+        TypeDescriptor::Unsigned(IntSize::U4) => iter_typed!(u32),
+        TypeDescriptor::Unsigned(IntSize::U8) => iter_typed!(u64),
+        TypeDescriptor::Float(FloatSize::U4) => iter_typed!(f32),
+        TypeDescriptor::Float(FloatSize::U8) => iter_typed!(f64),
+        TypeDescriptor::Boolean => iter_typed!(bool),
+        TypeDescriptor::VarLenUnicode => Box::new(
+            ds.read_1d::<hdf5_metno::types::VarLenUnicode>()
                 .unwrap_or_else(|e| die(&format!("read: {}", e)))
-                .iter()
-            {
-                println!("{}", v.as_str());
-            }
-        }
-        TypeDescriptor::VarLenAscii => {
-            for v in ds
-                .read_1d::<hdf5_metno::types::VarLenAscii>()
+                .into_iter()
+                .map(|v| v.as_str().to_string()),
+        ),
+        TypeDescriptor::VarLenAscii => Box::new(
+            ds.read_1d::<hdf5_metno::types::VarLenAscii>()
                 .unwrap_or_else(|e| die(&format!("read: {}", e)))
-                .iter()
-            {
-                println!("{}", v.as_str());
-            }
-        }
+                .into_iter()
+                .map(|v| v.as_str().to_string()),
+        ),
         _ => die("unsupported dtype for export"),
+    }
+}
+
+// Stream values through: print directly, or count and print sorted by frequency.
+fn output_iter(iter: impl Iterator<Item = String>, value_count: bool) {
+    if !value_count {
+        for v in iter {
+            println!("{}", v);
+        }
+    } else {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for v in iter {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+        let mut pairs: Vec<(String, usize)> = counts.into_iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (v, c) in pairs {
+            println!("{}\t{}", v, c);
+        }
     }
 }
 
@@ -139,56 +154,58 @@ fn read_string_dataset(ds: &hdf5_metno::Dataset) -> Vec<String> {
 
 // Decode categorical codes to their string labels.
 // Negative codes (pandas NA sentinel) become "NA".
-fn print_categorical(codes_ds: &hdf5_metno::Dataset, categories: &[String]) {
+fn collect_categorical(codes_ds: &hdf5_metno::Dataset, categories: &[String]) -> Vec<String> {
     let desc = codes_ds
         .dtype()
         .and_then(|d| d.to_descriptor())
         .unwrap_or_else(|e| die(&format!("codes dtype: {}", e)));
-    macro_rules! print_codes_signed {
-        ($T:ty) => {{
-            for &c in codes_ds
+    macro_rules! collect_signed {
+        ($T:ty) => {
+            codes_ds
                 .read_1d::<$T>()
                 .unwrap_or_else(|e| die(&format!("codes read: {}", e)))
                 .iter()
-            {
-                if c < 0 {
-                    println!("NA");
-                } else {
+                .map(|&c| {
+                    if c < 0 {
+                        "NA".to_string()
+                    } else {
+                        let idx = c as usize;
+                        if idx < categories.len() {
+                            categories[idx].clone()
+                        } else {
+                            die(&format!("code {} out of range", c))
+                        }
+                    }
+                })
+                .collect()
+        };
+    }
+    macro_rules! collect_unsigned {
+        ($T:ty) => {
+            codes_ds
+                .read_1d::<$T>()
+                .unwrap_or_else(|e| die(&format!("codes read: {}", e)))
+                .iter()
+                .map(|&c| {
                     let idx = c as usize;
                     if idx < categories.len() {
-                        println!("{}", categories[idx]);
+                        categories[idx].clone()
                     } else {
-                        die(&format!("code {} out of range", c));
+                        die(&format!("code {} out of range", c))
                     }
-                }
-            }
-        }};
-    }
-    macro_rules! print_codes_unsigned {
-        ($T:ty) => {{
-            for &c in codes_ds
-                .read_1d::<$T>()
-                .unwrap_or_else(|e| die(&format!("codes read: {}", e)))
-                .iter()
-            {
-                let idx = c as usize;
-                if idx < categories.len() {
-                    println!("{}", categories[idx]);
-                } else {
-                    die(&format!("code {} out of range", c));
-                }
-            }
-        }};
+                })
+                .collect()
+        };
     }
     match desc {
-        TypeDescriptor::Integer(IntSize::U1) => print_codes_signed!(i8),
-        TypeDescriptor::Integer(IntSize::U2) => print_codes_signed!(i16),
-        TypeDescriptor::Integer(IntSize::U4) => print_codes_signed!(i32),
-        TypeDescriptor::Integer(IntSize::U8) => print_codes_signed!(i64),
-        TypeDescriptor::Unsigned(IntSize::U1) => print_codes_unsigned!(u8),
-        TypeDescriptor::Unsigned(IntSize::U2) => print_codes_unsigned!(u16),
-        TypeDescriptor::Unsigned(IntSize::U4) => print_codes_unsigned!(u32),
-        TypeDescriptor::Unsigned(IntSize::U8) => print_codes_unsigned!(u64),
+        TypeDescriptor::Integer(IntSize::U1) => collect_signed!(i8),
+        TypeDescriptor::Integer(IntSize::U2) => collect_signed!(i16),
+        TypeDescriptor::Integer(IntSize::U4) => collect_signed!(i32),
+        TypeDescriptor::Integer(IntSize::U8) => collect_signed!(i64),
+        TypeDescriptor::Unsigned(IntSize::U1) => collect_unsigned!(u8),
+        TypeDescriptor::Unsigned(IntSize::U2) => collect_unsigned!(u16),
+        TypeDescriptor::Unsigned(IntSize::U4) => collect_unsigned!(u32),
+        TypeDescriptor::Unsigned(IntSize::U8) => collect_unsigned!(u64),
         _ => die("unsupported categorical codes type"),
     }
 }
@@ -384,9 +401,9 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
         {
             // Categorical column
             let categories = read_string_dataset(&cats_ds);
-            print_categorical(&codes_ds, &categories);
+            output_iter(collect_categorical(&codes_ds, &categories).into_iter(), false);
         } else if let Ok(values_ds) = file.dataset(&values_path) {
-            print_dataset_values(&values_ds);
+            output_iter(dataset_values(&values_ds), false);
         } else {
             die(&format!(
                 "unrecognised group structure for column '{}' in '{}'",
@@ -405,9 +422,9 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
     let cats_path_old = format!("{}/__categories/{}", group_name, col_name);
     if let Ok(cats_ds) = file.dataset(&cats_path_old) {
         let categories = read_string_dataset(&cats_ds);
-        print_categorical(&col_ds, &categories);
+        output_iter(collect_categorical(&col_ds, &categories).into_iter(), false);
     } else {
-        print_dataset_values(&col_ds);
+        output_iter(dataset_values(&col_ds), false);
     }
 }
 
