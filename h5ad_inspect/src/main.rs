@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::ffi::CString;
+use std::io::Write;
 use std::process;
 
 use hdf5_metno::types::{FloatSize, IntSize, TypeDescriptor};
@@ -529,8 +530,23 @@ fn read_data_slice(file: &hdf5_metno::File, start: usize, end: usize) -> Vec<f64
     }
 }
 
+fn write_f64_values(vals: &[f64], binary: bool) {
+    if binary {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        for &v in vals {
+            out.write_all(&v.to_le_bytes())
+                .unwrap_or_else(|e| die(&format!("write: {}", e)));
+        }
+    } else {
+        for &v in vals {
+            println!("{}", v);
+        }
+    }
+}
+
 // Export a CSR row: O(nnz_row) efficient
-fn export_x_csr_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize) {
+fn export_x_csr_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize, binary: bool) {
     let indptr = read_indptr(file);
     let start = indptr[row_idx];
     let end = indptr[row_idx + 1];
@@ -540,13 +556,11 @@ fn export_x_csr_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize) {
     for (k, &col) in indices.iter().enumerate() {
         vals[col] = data[k];
     }
-    for v in vals {
-        println!("{}", v);
-    }
+    write_f64_values(&vals, binary);
 }
 
 // Export a CSC column: O(nnz_col) efficient
-fn export_x_csc_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize) {
+fn export_x_csc_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize, binary: bool) {
     let indptr = read_indptr(file);
     let start = indptr[col_idx];
     let end = indptr[col_idx + 1];
@@ -556,13 +570,11 @@ fn export_x_csc_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize) {
     for (k, &row) in indices.iter().enumerate() {
         vals[row] = data[k];
     }
-    for v in vals {
-        println!("{}", v);
-    }
+    write_f64_values(&vals, binary);
 }
 
 // Export a CSR column (suboptimal: scans all rows)
-fn export_x_csr_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize) {
+fn export_x_csr_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize, binary: bool) {
     let indptr = read_indptr(file);
     // Read full indices + data — no way to avoid it for CSR column access
     let indices = read_indices_slice(file, 0, *indptr.last().unwrap_or(&0));
@@ -578,13 +590,11 @@ fn export_x_csr_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize) {
             }
         }
     }
-    for v in vals {
-        println!("{}", v);
-    }
+    write_f64_values(&vals, binary);
 }
 
 // Export a CSC row (suboptimal: scans all columns)
-fn export_x_csc_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize) {
+fn export_x_csc_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize, binary: bool) {
     let indptr = read_indptr(file);
     let indices = read_indices_slice(file, 0, *indptr.last().unwrap_or(&0));
     let data = read_data_slice(file, 0, *indptr.last().unwrap_or(&0));
@@ -599,12 +609,10 @@ fn export_x_csc_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize) {
             }
         }
     }
-    for v in vals {
-        println!("{}", v);
-    }
+    write_f64_values(&vals, binary);
 }
 
-fn export_x_row(file: &hdf5_metno::File, obs_idx_val: &str) {
+fn export_x_row(file: &hdf5_metno::File, obs_idx_val: &str, binary: bool) {
     let obs_index = read_group_index(file, "obs");
     let var_index = read_group_index(file, "var");
     let obs_pos = find_index_position(&obs_index, obs_idx_val);
@@ -617,8 +625,8 @@ fn export_x_row(file: &hdf5_metno::File, obs_idx_val: &str) {
     if x_loc == hdf5_metno::LocationType::Group {
         let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
         match fmt.as_str() {
-            "csr" => export_x_csr_row(file, obs_pos, n_var),
-            "csc" => export_x_csc_row(file, obs_pos, n_var),
+            "csr" => export_x_csr_row(file, obs_pos, n_var, binary),
+            "csc" => export_x_csc_row(file, obs_pos, n_var, binary),
             _ => die(&format!("unknown sparse format: {}", fmt)),
         }
     } else {
@@ -630,28 +638,27 @@ fn export_x_row(file: &hdf5_metno::File, obs_idx_val: &str) {
             .dtype()
             .and_then(|d| d.to_descriptor())
             .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
-        macro_rules! print_dense_row {
+        macro_rules! collect_dense_row {
             ($T:ty) => {
-                for v in ds
-                    .read_slice_1d::<$T, _>(s![obs_pos, ..])
+                ds.read_slice_1d::<$T, _>(s![obs_pos, ..])
                     .unwrap_or_else(|e| die(&format!("X row read: {}", e)))
                     .iter()
-                {
-                    println!("{}", *v as f64);
-                }
+                    .map(|&v| v as f64)
+                    .collect::<Vec<f64>>()
             };
         }
-        match desc {
-            TypeDescriptor::Float(FloatSize::U4) => print_dense_row!(f32),
-            TypeDescriptor::Float(FloatSize::U8) => print_dense_row!(f64),
-            TypeDescriptor::Integer(IntSize::U4) => print_dense_row!(i32),
-            TypeDescriptor::Unsigned(IntSize::U4) => print_dense_row!(u32),
+        let vals = match desc {
+            TypeDescriptor::Float(FloatSize::U4) => collect_dense_row!(f32),
+            TypeDescriptor::Float(FloatSize::U8) => collect_dense_row!(f64),
+            TypeDescriptor::Integer(IntSize::U4) => collect_dense_row!(i32),
+            TypeDescriptor::Unsigned(IntSize::U4) => collect_dense_row!(u32),
             _ => die("unsupported dense X dtype"),
-        }
+        };
+        write_f64_values(&vals, binary);
     }
 }
 
-fn export_x_column(file: &hdf5_metno::File, var_idx_val: &str) {
+fn export_x_column(file: &hdf5_metno::File, var_idx_val: &str, binary: bool) {
     let obs_index = read_group_index(file, "obs");
     let var_index = read_group_index(file, "var");
     let var_pos = find_index_position(&var_index, var_idx_val);
@@ -664,8 +671,8 @@ fn export_x_column(file: &hdf5_metno::File, var_idx_val: &str) {
     if x_loc == hdf5_metno::LocationType::Group {
         let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
         match fmt.as_str() {
-            "csr" => export_x_csr_col(file, var_pos, n_obs),
-            "csc" => export_x_csc_col(file, var_pos, n_obs),
+            "csr" => export_x_csr_col(file, var_pos, n_obs, binary),
+            "csc" => export_x_csc_col(file, var_pos, n_obs, binary),
             _ => die(&format!("unknown sparse format: {}", fmt)),
         }
     } else {
@@ -676,24 +683,23 @@ fn export_x_column(file: &hdf5_metno::File, var_idx_val: &str) {
             .dtype()
             .and_then(|d| d.to_descriptor())
             .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
-        macro_rules! print_dense_col {
+        macro_rules! collect_dense_col {
             ($T:ty) => {
-                for v in ds
-                    .read_slice_1d::<$T, _>(s![.., var_pos])
+                ds.read_slice_1d::<$T, _>(s![.., var_pos])
                     .unwrap_or_else(|e| die(&format!("X col read: {}", e)))
                     .iter()
-                {
-                    println!("{}", *v as f64);
-                }
+                    .map(|&v| v as f64)
+                    .collect::<Vec<f64>>()
             };
         }
-        match desc {
-            TypeDescriptor::Float(FloatSize::U4) => print_dense_col!(f32),
-            TypeDescriptor::Float(FloatSize::U8) => print_dense_col!(f64),
-            TypeDescriptor::Integer(IntSize::U4) => print_dense_col!(i32),
-            TypeDescriptor::Unsigned(IntSize::U4) => print_dense_col!(u32),
+        let vals = match desc {
+            TypeDescriptor::Float(FloatSize::U4) => collect_dense_col!(f32),
+            TypeDescriptor::Float(FloatSize::U8) => collect_dense_col!(f64),
+            TypeDescriptor::Integer(IntSize::U4) => collect_dense_col!(i32),
+            TypeDescriptor::Unsigned(IntSize::U4) => collect_dense_col!(u32),
             _ => die("unsupported dense X dtype"),
-        }
+        };
+        write_f64_values(&vals, binary);
     }
 }
 
@@ -708,42 +714,43 @@ fn main() {
     // "export" and the filename may appear in any order; sub-cmd and name follow export.
     if let Some(export_pos) = args[1..].iter().position(|a| a == "export") {
         let export_pos = export_pos + 1; // index into args
-        if export_pos + 1 >= args.len() {
+
+        // Strip --binary from the remaining args after "export".
+        let binary = args[export_pos + 1..].iter().any(|a| a == "--binary");
+        let export_args: Vec<&str> = args[export_pos + 1..]
+            .iter()
+            .filter(|a| a.as_str() != "--binary")
+            .map(|a| a.as_str())
+            .collect();
+
+        if export_args.is_empty() {
             eprintln!(
                 "Usage: h5ad-inspect <filename> export obs_index|var_index"
             );
             eprintln!(
-                "       h5ad-inspect <filename> export obs|var|row|column <name>"
+                "       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>"
             );
             process::exit(1);
         }
-        let sub_cmd = args[export_pos + 1].as_str();
+        let sub_cmd = export_args[0];
 
         // obs_index / var_index take no <name> argument.
         let no_name_cmds = ["obs_index", "var_index"];
         let needs_name = !no_name_cmds.contains(&sub_cmd);
 
-        if needs_name && export_pos + 2 >= args.len() {
+        if needs_name && export_args.len() < 2 {
             eprintln!("Error: export {} requires a <name> argument", sub_cmd);
             process::exit(1);
         }
 
-        let name = if needs_name {
-            args[export_pos + 2].as_str()
-        } else {
-            ""
-        };
+        let name = if needs_name { export_args[1] } else { "" };
 
-        let name_slots = if needs_name { 3 } else { 2 };
-        // filename is the arg in args[1..] not consumed by export_pos..export_pos+name_slots
-        let filename = args[1..]
+        // filename is the arg in args[1..] before "export" (or after the export block).
+        // Since --binary has been stripped, find the first arg before export_pos that
+        // isn't "export" itself, i.e. the positional before "export".
+        let filename = args[1..export_pos]
             .iter()
-            .enumerate()
-            .filter(|(i, _)| {
-                let abs = i + 1;
-                abs < export_pos || abs >= export_pos + name_slots
-            })
-            .map(|(_, a)| a.as_str())
+            .map(|a| a.as_str())
             .next()
             .unwrap_or_else(|| {
                 eprintln!("Error: could not determine filename");
@@ -768,8 +775,8 @@ fn main() {
             }
             "obs" => export_obs_var_column(&file, "obs", name),
             "var" => export_obs_var_column(&file, "var", name),
-            "row" => export_x_row(&file, name),
-            "column" => export_x_column(&file, name),
+            "row" => export_x_row(&file, name, binary),
+            "column" => export_x_column(&file, name, binary),
             _ => {
                 eprintln!(
                     "Error: export subcommand must be obs_index, var_index, obs, var, row, or column"
@@ -783,7 +790,7 @@ fn main() {
     // Original inspect mode: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index
     if args.len() != 3 {
         eprintln!("Usage: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index");
-        eprintln!("       h5ad-inspect <filename> export obs|var|row|column <name>");
+        eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>");
         process::exit(1);
     }
 
