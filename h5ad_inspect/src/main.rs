@@ -370,6 +370,50 @@ fn export_compound_dataset_field(
     }
 }
 
+fn export_obs_var_categories(file: &hdf5_metno::File, group_name: &str, col_name: &str) {
+    let loc_type = file
+        .loc_type_by_name(group_name)
+        .unwrap_or_else(|e| die(&format!("cannot locate '{}': {}", group_name, e)));
+
+    if loc_type != hdf5_metno::LocationType::Group {
+        // Old compound dataset — categories live in uns/<col>_categories.
+        let cats_path = format!("uns/{}_categories", col_name);
+        let cats_ds = file
+            .dataset(&cats_path)
+            .unwrap_or_else(|_| die(&format!("no categories found for '{}' (tried {})", col_name, cats_path)));
+        for v in read_string_dataset(&cats_ds) {
+            println!("{}", v);
+        }
+        return;
+    }
+
+    let col_path = format!("{}/{}", group_name, col_name);
+    let col_loc = file
+        .loc_type_by_name(&col_path)
+        .unwrap_or_else(|_| die(&format!("column '{}' not found in '{}'", col_name, group_name)));
+
+    if col_loc == hdf5_metno::LocationType::Group {
+        // New-style: group contains categories dataset.
+        let cats_path = format!("{}/categories", col_path);
+        let cats_ds = file
+            .dataset(&cats_path)
+            .unwrap_or_else(|_| die(&format!("'{}' is not categorical (no categories dataset)", col_path)));
+        for v in read_string_dataset(&cats_ds) {
+            println!("{}", v);
+        }
+        return;
+    }
+
+    // Old-style: flat codes dataset + <group>/__categories/<col>.
+    let cats_path = format!("{}/__categories/{}", group_name, col_name);
+    let cats_ds = file
+        .dataset(&cats_path)
+        .unwrap_or_else(|_| die(&format!("'{}' is not categorical (no __categories entry)", col_name)));
+    for v in read_string_dataset(&cats_ds) {
+        println!("{}", v);
+    }
+}
+
 fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &str) {
     let loc_type = file
         .loc_type_by_name(group_name)
@@ -895,13 +939,15 @@ fn main() {
             }
             "obs" => export_obs_var_column(&file, "obs", name),
             "var" => export_obs_var_column(&file, "var", name),
+            "obs_categories" => export_obs_var_categories(&file, "obs", name),
+            "var_categories" => export_obs_var_categories(&file, "var", name),
             "row" => export_x_row(&file, name, binary),
             "column" => export_x_column(&file, name, binary),
             "obssum" => export_x_obssum(&file, binary),
             "varsum" => export_x_varsum(&file, binary),
             _ => {
                 eprintln!(
-                    "Error: export subcommand must be obs_index, var_index, obs, var, row, column, obssum, or varsum"
+                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, row, column, obssum, or varsum"
                 );
                 process::exit(1);
             }

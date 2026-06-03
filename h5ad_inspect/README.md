@@ -53,7 +53,8 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `column` | var ID | X matrix column for that gene (one value per cell) |
 | `obssum` | — | sum of X across all vars, one value per obs (row sums) |
 | `varsum` | — | sum of X across all obs, one value per var (col sums) |
-
+| `obs_categories` | column name | order of the categories  of this column |
+| `val_categories` | column name | order of the categories  of this column |
 Categorical columns are decoded to their string labels.
 
 ```bash
