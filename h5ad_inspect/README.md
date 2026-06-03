@@ -27,8 +27,8 @@ h5ad-inspect data.h5ad var         # list var column names
 h5ad-inspect data.h5ad uns         # list uns keys
 h5ad-inspect data.h5ad obsm        # list obsm keys
 h5ad-inspect data.h5ad layers      # list layer names
-h5ad-inspect data.h5ad obs_index   # list obs index values (sorted, use export for original order)
-h5ad-inspect data.h5ad var_index   # list var index values (sorted, use export for original order)
+h5ad-inspect data.h5ad obs_index   # list obs index values (sorted, use 'export obs_index' for original order)
+h5ad-inspect data.h5ad var_index   # list var index values (sorted, use 'export var_index' for original order)
 ```
 
 ---
@@ -51,8 +51,10 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `var` | column name | values of a var column |
 | `row` | obs ID | X matrix row for that cell (one value per gene) |
 | `column` | var ID | X matrix column for that gene (one value per cell) |
+| `obssum` | — | sum of X across all vars, one value per obs (row sums) |
+| `varsum` | — | sum of X across all obs, one value per var (col sums) |
 
-Categorical columns are decoded to their string labels. 
+Categorical columns are decoded to their string labels.
 
 ```bash
 # Export a single obs column
@@ -63,13 +65,19 @@ h5ad-inspect data.h5ad export row AAACCTGAGAAGGCCT-1
 
 # Export the X column for a specific gene
 h5ad-inspect data.h5ad export column GAPDH
+
+# Sum X across all genes per cell (total counts per cell)
+h5ad-inspect data.h5ad export obssum
+
+# Sum X across all cells per gene (total counts per gene)
+h5ad-inspect data.h5ad export varsum
 ```
 
 ### Binary float output (`--binary`)
 
-For `row` and `column` exports, passing `--binary` writes raw little-endian
-`float64` bytes to stdout instead of newline-separated text. This is the fastest
-path into NumPy — no text parsing overhead.
+For `row`, `column`, `obssum`, and `varsum` exports, passing `--binary` writes
+raw little-endian `float64` bytes to stdout instead of newline-separated text.
+This is the fastest path into NumPy — no text parsing overhead.
 
 ```bash
 h5ad-inspect data.h5ad export --binary row AAACCTGAGAAGGCCT-1 \

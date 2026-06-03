@@ -593,6 +593,126 @@ fn export_x_csr_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize, bina
     write_f64_values(&vals, binary);
 }
 
+fn export_x_obssum(file: &hdf5_metno::File, binary: bool) {
+    let n_obs = read_group_index(file, "obs").len();
+    let x_loc = file
+        .loc_type_by_name("X")
+        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+    if x_loc == hdf5_metno::LocationType::Group {
+        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
+        let indptr = read_indptr(file);
+        let nnz = *indptr.last().unwrap_or(&0);
+        let sums = match fmt.as_str() {
+            "csr" => {
+                let data = read_data_slice(file, 0, nnz);
+                (0..n_obs)
+                    .map(|i| data[indptr[i]..indptr[i + 1]].iter().sum::<f64>())
+                    .collect::<Vec<f64>>()
+            }
+            "csc" => {
+                let data = read_data_slice(file, 0, nnz);
+                let indices = read_indices_slice(file, 0, nnz);
+                let mut sums = vec![0.0f64; n_obs];
+                for (k, &row) in indices.iter().enumerate() {
+                    sums[row] += data[k];
+                }
+                sums
+            }
+            _ => die(&format!("unknown sparse format: {}", fmt)),
+        };
+        write_f64_values(&sums, binary);
+    } else {
+        let ds = file
+            .dataset("X")
+            .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+        let desc = ds
+            .dtype()
+            .and_then(|d| d.to_descriptor())
+            .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
+        macro_rules! dense_obssum {
+            ($T:ty) => {{
+                (0..n_obs)
+                    .map(|i| {
+                        ds.read_slice_1d::<$T, _>(s![i, ..])
+                            .unwrap_or_else(|e| die(&format!("X row read: {}", e)))
+                            .iter()
+                            .map(|&v| v as f64)
+                            .sum::<f64>()
+                    })
+                    .collect::<Vec<f64>>()
+            }};
+        }
+        let sums = match desc {
+            TypeDescriptor::Float(FloatSize::U4) => dense_obssum!(f32),
+            TypeDescriptor::Float(FloatSize::U8) => dense_obssum!(f64),
+            TypeDescriptor::Integer(IntSize::U4) => dense_obssum!(i32),
+            TypeDescriptor::Unsigned(IntSize::U4) => dense_obssum!(u32),
+            _ => die("unsupported dense X dtype"),
+        };
+        write_f64_values(&sums, binary);
+    }
+}
+
+fn export_x_varsum(file: &hdf5_metno::File, binary: bool) {
+    let n_var = read_group_index(file, "var").len();
+    let x_loc = file
+        .loc_type_by_name("X")
+        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+    if x_loc == hdf5_metno::LocationType::Group {
+        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
+        let indptr = read_indptr(file);
+        let nnz = *indptr.last().unwrap_or(&0);
+        let sums = match fmt.as_str() {
+            "csr" => {
+                let data = read_data_slice(file, 0, nnz);
+                let indices = read_indices_slice(file, 0, nnz);
+                let mut sums = vec![0.0f64; n_var];
+                for (k, &col) in indices.iter().enumerate() {
+                    sums[col] += data[k];
+                }
+                sums
+            }
+            "csc" => {
+                let data = read_data_slice(file, 0, nnz);
+                (0..n_var)
+                    .map(|j| data[indptr[j]..indptr[j + 1]].iter().sum::<f64>())
+                    .collect::<Vec<f64>>()
+            }
+            _ => die(&format!("unknown sparse format: {}", fmt)),
+        };
+        write_f64_values(&sums, binary);
+    } else {
+        let ds = file
+            .dataset("X")
+            .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+        let desc = ds
+            .dtype()
+            .and_then(|d| d.to_descriptor())
+            .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
+        macro_rules! dense_varsum {
+            ($T:ty) => {{
+                (0..n_var)
+                    .map(|j| {
+                        ds.read_slice_1d::<$T, _>(s![.., j])
+                            .unwrap_or_else(|e| die(&format!("X col read: {}", e)))
+                            .iter()
+                            .map(|&v| v as f64)
+                            .sum::<f64>()
+                    })
+                    .collect::<Vec<f64>>()
+            }};
+        }
+        let sums = match desc {
+            TypeDescriptor::Float(FloatSize::U4) => dense_varsum!(f32),
+            TypeDescriptor::Float(FloatSize::U8) => dense_varsum!(f64),
+            TypeDescriptor::Integer(IntSize::U4) => dense_varsum!(i32),
+            TypeDescriptor::Unsigned(IntSize::U4) => dense_varsum!(u32),
+            _ => die("unsupported dense X dtype"),
+        };
+        write_f64_values(&sums, binary);
+    }
+}
+
 // Export a CSC row (suboptimal: scans all columns)
 fn export_x_csc_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize, binary: bool) {
     let indptr = read_indptr(file);
@@ -725,7 +845,7 @@ fn main() {
 
         if export_args.is_empty() {
             eprintln!(
-                "Usage: h5ad-inspect <filename> export obs_index|var_index"
+                "Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum"
             );
             eprintln!(
                 "       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>"
@@ -734,8 +854,8 @@ fn main() {
         }
         let sub_cmd = export_args[0];
 
-        // obs_index / var_index take no <name> argument.
-        let no_name_cmds = ["obs_index", "var_index"];
+        // obs_index / var_index / obssum / varsum take no <name> argument.
+        let no_name_cmds = ["obs_index", "var_index", "obssum", "varsum"];
         let needs_name = !no_name_cmds.contains(&sub_cmd);
 
         if needs_name && export_args.len() < 2 {
@@ -777,9 +897,11 @@ fn main() {
             "var" => export_obs_var_column(&file, "var", name),
             "row" => export_x_row(&file, name, binary),
             "column" => export_x_column(&file, name, binary),
+            "obssum" => export_x_obssum(&file, binary),
+            "varsum" => export_x_varsum(&file, binary),
             _ => {
                 eprintln!(
-                    "Error: export subcommand must be obs_index, var_index, obs, var, row, or column"
+                    "Error: export subcommand must be obs_index, var_index, obs, var, row, column, obssum, or varsum"
                 );
                 process::exit(1);
             }
