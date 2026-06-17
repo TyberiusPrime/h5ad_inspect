@@ -24,7 +24,7 @@ end
 # True when neither a section keyword nor "export" has been given yet.
 function __h5ad_needs_section
     set -l toks (commandline -opc)
-    for kw in obs var uns obsm layers obs_index var_index export
+    for kw in obs var uns obsm layers obs_index var_index shape export
         contains -- $kw $toks; and return 1
     end
     return 0
@@ -84,6 +84,8 @@ complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
     -a obs_index -d 'Show obs index (sorted)'
 complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
     -a var_index -d 'Show var index (sorted)'
+complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
+    -a shape     -d 'Show n_obs and n_var (cells and genes)'
 complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
     -a export    -d 'Export values to stdout'
 

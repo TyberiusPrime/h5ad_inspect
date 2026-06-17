@@ -29,6 +29,7 @@ h5ad-inspect data.h5ad obsm        # list obsm keys
 h5ad-inspect data.h5ad layers      # list layer names
 h5ad-inspect data.h5ad obs_index   # list obs index values (sorted, use 'export obs_index' for original order)
 h5ad-inspect data.h5ad var_index   # list var index values (sorted, use 'export var_index' for original order)
+h5ad-inspect data.h5ad shape       # print n_obs and n_var (number of cells and genes)
 ```
 
 ---

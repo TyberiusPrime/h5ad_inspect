@@ -9,7 +9,7 @@ use hdf5_metno::Datatype;
 use hdf5_metno_sys::h5d::H5Dread;
 use hdf5_metno_sys::h5p::H5P_DEFAULT;
 use hdf5_metno_sys::h5s::H5S_ALL;
-use hdf5_metno_sys::h5t::{H5Tclose, H5Tcreate, H5Tinsert, H5T_class_t};
+use hdf5_metno_sys::h5t::{H5T_class_t, H5Tclose, H5Tcreate, H5Tinsert};
 use ndarray::s;
 
 // Used to read index from old-format h5ad where obs/var is a compound dataset
@@ -54,7 +54,10 @@ fn read_group_index(file: &hdf5_metno::File, group_name: &str) -> Vec<String> {
             .unwrap_or_else(|e| die(&format!("cannot open '{}': {}", group_name, e)));
         match ds.read_1d::<CompoundIndex>() {
             Ok(arr) => arr.iter().map(|r| r.index.as_str().to_string()).collect(),
-            Err(e) => die(&format!("cannot read compound index '{}': {}", group_name, e)),
+            Err(e) => die(&format!(
+                "cannot read compound index '{}': {}",
+                group_name, e
+            )),
         }
     }
 }
@@ -219,9 +222,7 @@ fn export_compound_dataset_field(
     ds: &hdf5_metno::Dataset,
     col_name: &str,
 ) {
-    let file_dtype = ds
-        .dtype()
-        .unwrap_or_else(|e| die(&format!("dtype: {}", e)));
+    let file_dtype = ds.dtype().unwrap_or_else(|e| die(&format!("dtype: {}", e)));
     let desc = file_dtype
         .to_descriptor()
         .unwrap_or_else(|e| die(&format!("desc: {}", e)));
@@ -234,7 +235,12 @@ fn export_compound_dataset_field(
         .fields
         .iter()
         .find(|f| f.name == col_name)
-        .unwrap_or_else(|| die(&format!("field '{}' not found in compound dataset", col_name)));
+        .unwrap_or_else(|| {
+            die(&format!(
+                "field '{}' not found in compound dataset",
+                col_name
+            ))
+        });
 
     let n_rows = ds.shape()[0];
 
@@ -268,9 +274,10 @@ fn export_compound_dataset_field(
 
     // Check for old-style categories in uns/<col>_categories.
     let cats_uns_path = format!("uns/{}_categories", col_name);
-    let categories: Option<Vec<String>> = file.dataset(&cats_uns_path).ok().map(|cats_ds| {
-        read_string_dataset(&cats_ds)
-    });
+    let categories: Option<Vec<String>> = file
+        .dataset(&cats_uns_path)
+        .ok()
+        .map(|cats_ds| read_string_dataset(&cats_ds));
 
     // Helper: print an integer code, resolving via categories if available.
     macro_rules! print_int_or_cat {
@@ -355,12 +362,18 @@ fn export_compound_dataset_field(
         }
         TypeDescriptor::Float(FloatSize::U4) => {
             for i in 0..n_rows {
-                println!("{}", f32::from_ne_bytes(buf[i * 4..(i + 1) * 4].try_into().unwrap()));
+                println!(
+                    "{}",
+                    f32::from_ne_bytes(buf[i * 4..(i + 1) * 4].try_into().unwrap())
+                );
             }
         }
         TypeDescriptor::Float(FloatSize::U8) => {
             for i in 0..n_rows {
-                println!("{}", f64::from_ne_bytes(buf[i * 8..(i + 1) * 8].try_into().unwrap()));
+                println!(
+                    "{}",
+                    f64::from_ne_bytes(buf[i * 8..(i + 1) * 8].try_into().unwrap())
+                );
             }
         }
         _ => die(&format!(
@@ -378,9 +391,12 @@ fn export_obs_var_categories(file: &hdf5_metno::File, group_name: &str, col_name
     if loc_type != hdf5_metno::LocationType::Group {
         // Old compound dataset — categories live in uns/<col>_categories.
         let cats_path = format!("uns/{}_categories", col_name);
-        let cats_ds = file
-            .dataset(&cats_path)
-            .unwrap_or_else(|_| die(&format!("no categories found for '{}' (tried {})", col_name, cats_path)));
+        let cats_ds = file.dataset(&cats_path).unwrap_or_else(|_| {
+            die(&format!(
+                "no categories found for '{}' (tried {})",
+                col_name, cats_path
+            ))
+        });
         for v in read_string_dataset(&cats_ds) {
             println!("{}", v);
         }
@@ -388,16 +404,22 @@ fn export_obs_var_categories(file: &hdf5_metno::File, group_name: &str, col_name
     }
 
     let col_path = format!("{}/{}", group_name, col_name);
-    let col_loc = file
-        .loc_type_by_name(&col_path)
-        .unwrap_or_else(|_| die(&format!("column '{}' not found in '{}'", col_name, group_name)));
+    let col_loc = file.loc_type_by_name(&col_path).unwrap_or_else(|_| {
+        die(&format!(
+            "column '{}' not found in '{}'",
+            col_name, group_name
+        ))
+    });
 
     if col_loc == hdf5_metno::LocationType::Group {
         // New-style: group contains categories dataset.
         let cats_path = format!("{}/categories", col_path);
-        let cats_ds = file
-            .dataset(&cats_path)
-            .unwrap_or_else(|_| die(&format!("'{}' is not categorical (no categories dataset)", col_path)));
+        let cats_ds = file.dataset(&cats_path).unwrap_or_else(|_| {
+            die(&format!(
+                "'{}' is not categorical (no categories dataset)",
+                col_path
+            ))
+        });
         for v in read_string_dataset(&cats_ds) {
             println!("{}", v);
         }
@@ -406,9 +428,12 @@ fn export_obs_var_categories(file: &hdf5_metno::File, group_name: &str, col_name
 
     // Old-style: flat codes dataset + <group>/__categories/<col>.
     let cats_path = format!("{}/__categories/{}", group_name, col_name);
-    let cats_ds = file
-        .dataset(&cats_path)
-        .unwrap_or_else(|_| die(&format!("'{}' is not categorical (no __categories entry)", col_name)));
+    let cats_ds = file.dataset(&cats_path).unwrap_or_else(|_| {
+        die(&format!(
+            "'{}' is not categorical (no __categories entry)",
+            col_name
+        ))
+    });
     for v in read_string_dataset(&cats_ds) {
         println!("{}", v);
     }
@@ -431,9 +456,12 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
     let col_path = format!("{}/{}", group_name, col_name);
 
     // Check if the column is itself a group (new-style h5ad categorical/string storage).
-    let col_loc = file
-        .loc_type_by_name(&col_path)
-        .unwrap_or_else(|_| die(&format!("column '{}' not found in '{}'", col_name, group_name)));
+    let col_loc = file.loc_type_by_name(&col_path).unwrap_or_else(|_| {
+        die(&format!(
+            "column '{}' not found in '{}'",
+            col_name, group_name
+        ))
+    });
 
     if col_loc == hdf5_metno::LocationType::Group {
         // New-style: group contains `categories` + `codes`, or `values` for strings.
@@ -446,7 +474,10 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
         {
             // Categorical column
             let categories = read_string_dataset(&cats_ds);
-            output_iter(collect_categorical(&codes_ds, &categories).into_iter(), false);
+            output_iter(
+                collect_categorical(&codes_ds, &categories).into_iter(),
+                false,
+            );
         } else if let Ok(values_ds) = file.dataset(&values_path) {
             output_iter(dataset_values(&values_ds), false);
         } else {
@@ -888,12 +919,8 @@ fn main() {
             .collect();
 
         if export_args.is_empty() {
-            eprintln!(
-                "Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum"
-            );
-            eprintln!(
-                "       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>"
-            );
+            eprintln!("Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum");
+            eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>");
             process::exit(1);
         }
         let sub_cmd = export_args[0];
@@ -955,9 +982,11 @@ fn main() {
         return;
     }
 
-    // Original inspect mode: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index
+    // Original inspect mode: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape
     if args.len() != 3 {
-        eprintln!("Usage: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index");
+        eprintln!(
+            "Usage: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape"
+        );
         eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>");
         process::exit(1);
     }
@@ -970,6 +999,7 @@ fn main() {
         "layers",
         "obs_index",
         "var_index",
+        "shape",
     ];
     let section_arg = args[1..].iter().find(|a| sections.contains(&a.as_str()));
     let section = match section_arg {
@@ -1082,9 +1112,7 @@ fn main() {
                     }
                 };
                 let index_name = match group.attr("_index") {
-                    Ok(attr) => match attr
-                        .read_scalar::<hdf5_metno::types::VarLenUnicode>()
-                    {
+                    Ok(attr) => match attr.read_scalar::<hdf5_metno::types::VarLenUnicode>() {
                         Ok(v) => v.as_str().to_string(),
                         Err(_) => "_index".to_string(),
                     },
@@ -1124,17 +1152,25 @@ fn main() {
                         process::exit(1);
                     }
                 };
-                let mut values: Vec<String> =
-                    arr.iter().map(|row| row.index.as_str().to_string()).collect();
+                let mut values: Vec<String> = arr
+                    .iter()
+                    .map(|row| row.index.as_str().to_string())
+                    .collect();
                 values.sort_unstable();
                 for v in values {
                     println!("{}", v);
                 }
             }
         }
+        "shape" => {
+            let n_obs = read_group_index(&file, "obs").len();
+            let n_var = read_group_index(&file, "var").len();
+            println!("n_obs\t{}", n_obs);
+            println!("n_var\t{}", n_var);
+        }
         _ => {
             eprintln!(
-                "Error: section must be one of obs, var, uns, obsm, layers, obs_index, var_index"
+                "Error: section must be one of obs, var, uns, obsm, layers, obs_index, var_index, shape"
             );
             process::exit(1);
         }
