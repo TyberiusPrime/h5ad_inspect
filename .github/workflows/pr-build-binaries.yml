@@ -28,12 +28,6 @@ jobs:
             use_target: true
             artifact_path: target/aarch64-apple-darwin/release
             bin_suffix: ""
-          - name: win-amd64
-            runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            use_target: true
-            artifact_path: target/x86_64-pc-windows-msvc/release
-            bin_suffix: ".exe"
 
     steps:
       - name: Checkout

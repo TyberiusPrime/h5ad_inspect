@@ -98,9 +98,6 @@ jobs:
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin
-          - name: win-amd64
-            runner: windows-latest
-            target: x86_64-pc-windows-msvc
 
     # The steps to run for each matrix item
     permissions:
@@ -142,7 +139,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.name }}-binary
-          path: target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}${{ matrix.runner == 'windows-latest' && '.exe' || '' }}
+          path: target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}
 
 
   publish-crate:
@@ -212,9 +209,6 @@ jobs:
           # Rename macOS binary
           cp artifacts/macos-arm64-binary/h5ad-inspect release-binaries/h5ad-inspect-aarch64-apple-darwin
 
-          # Rename Windows binary
-          cp artifacts/win-amd64-binary/h5ad-inspect.exe release-binaries/h5ad-inspect-x86_64-pc-windows-msvc.exe
-
           # Display renamed binaries
           ls -lh release-binaries/
 
@@ -224,4 +218,3 @@ jobs:
           files: |
             release-binaries/h5ad-inspect-x86_64-unknown-linux-gnu
             release-binaries/h5ad-inspect-aarch64-apple-darwin
-            release-binaries/h5ad-inspect-x86_64-pc-windows-msvc.exe
