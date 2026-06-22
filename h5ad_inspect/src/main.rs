@@ -156,6 +156,61 @@ fn read_string_dataset(ds: &hdf5_metno::Dataset) -> Vec<String> {
     }
 }
 
+// Read a boolean mask dataset (stored as bool or 0/1 integer).
+fn read_bool_mask(ds: &hdf5_metno::Dataset) -> Vec<bool> {
+    let desc = ds
+        .dtype()
+        .and_then(|d| d.to_descriptor())
+        .unwrap_or_else(|e| die(&format!("mask dtype: {}", e)));
+    macro_rules! mask_from {
+        ($T:ty, $map:expr) => {
+            ds.read_1d::<$T>()
+                .unwrap_or_else(|e| die(&format!("mask read: {}", e)))
+                .iter()
+                .map($map)
+                .collect()
+        };
+    }
+    match desc {
+        TypeDescriptor::Boolean => mask_from!(bool, |&v| v),
+        TypeDescriptor::Unsigned(IntSize::U1) => mask_from!(u8, |&v| v != 0),
+        TypeDescriptor::Integer(IntSize::U1) => mask_from!(i8, |&v| v != 0),
+        _ => die("unsupported mask dtype"),
+    }
+}
+
+fn collect_dataset_values(ds: &hdf5_metno::Dataset) -> Vec<String> {
+    dataset_values(ds).collect()
+}
+
+// Replace masked entries with "NA" (pandas NA sentinel).
+fn apply_mask(values: Vec<String>, mask: Option<Vec<bool>>) -> Vec<String> {
+    match mask {
+        Some(m) => values
+            .into_iter()
+            .zip(m.into_iter())
+            .map(|(v, na)| if na { "NA".to_string() } else { v })
+            .collect(),
+        None => values,
+    }
+}
+
+// Read a "categories" element that may be a plain string dataset or a
+// nullable-string-array group (values + mask).
+fn read_categories(file: &hdf5_metno::File, cats_path: &str) -> Option<Vec<String>> {
+    if let Ok(ds) = file.dataset(cats_path) {
+        return Some(read_string_dataset(&ds));
+    }
+    let values_path = format!("{}/values", cats_path);
+    let values_ds = file.dataset(&values_path).ok()?;
+    let mut cats = collect_dataset_values(&values_ds);
+    let mask_path = format!("{}/mask", cats_path);
+    if let Ok(mask_ds) = file.dataset(&mask_path) {
+        cats = apply_mask(cats, Some(read_bool_mask(&mask_ds)));
+    }
+    Some(cats)
+}
+
 // Decode categorical codes to their string labels.
 // Negative codes (pandas NA sentinel) become "NA".
 fn collect_categorical(codes_ds: &hdf5_metno::Dataset, categories: &[String]) -> Vec<String> {
@@ -412,16 +467,18 @@ fn export_obs_var_categories(file: &hdf5_metno::File, group_name: &str, col_name
     });
 
     if col_loc == hdf5_metno::LocationType::Group {
-        // New-style: group contains categories dataset.
+        // New-style: group contains categories dataset (or nullable-string-array group).
         let cats_path = format!("{}/categories", col_path);
-        let cats_ds = file.dataset(&cats_path).unwrap_or_else(|_| {
-            die(&format!(
+        match read_categories(file, &cats_path) {
+            Some(cats) => {
+                for v in cats {
+                    println!("{}", v);
+                }
+            }
+            None => die(&format!(
                 "'{}' is not categorical (no categories dataset)",
                 col_path
-            ))
-        });
-        for v in read_string_dataset(&cats_ds) {
-            println!("{}", v);
+            )),
         }
         return;
     }
@@ -464,29 +521,43 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
     });
 
     if col_loc == hdf5_metno::LocationType::Group {
-        // New-style: group contains `categories` + `codes`, or `values` for strings.
+        // New-style: group contains `categories` + `codes` (categorical),
+        // or `values` + `mask` (nullable integer/string/boolean).
         let codes_path = format!("{}/codes", col_path);
-        let cats_path_new = format!("{}/categories", col_path);
+        let cats_path = format!("{}/categories", col_path);
         let values_path = format!("{}/values", col_path);
+        let mask_path = format!("{}/mask", col_path);
 
-        if let (Ok(codes_ds), Ok(cats_ds)) =
-            (file.dataset(&codes_path), file.dataset(&cats_path_new))
-        {
-            // Categorical column
-            let categories = read_string_dataset(&cats_ds);
+        // Categorical column: codes + categories (categories may be a plain
+        // string dataset or a nullable-string-array group).
+        if let Ok(codes_ds) = file.dataset(&codes_path) {
+            let categories = read_categories(file, &cats_path).unwrap_or_else(|| {
+                die(&format!(
+                    "categorical column '{}' has no categories",
+                    col_name
+                ))
+            });
             output_iter(
                 collect_categorical(&codes_ds, &categories).into_iter(),
                 false,
             );
-        } else if let Ok(values_ds) = file.dataset(&values_path) {
-            output_iter(dataset_values(&values_ds), false);
-        } else {
-            die(&format!(
-                "unrecognised group structure for column '{}' in '{}'",
-                col_name, group_name
-            ));
+            return;
         }
-        return;
+
+        // Nullable column (integer/string/boolean): values + mask.
+        if let Ok(values_ds) = file.dataset(&values_path) {
+            let mask = file.dataset(&mask_path).ok().map(|m| read_bool_mask(&m));
+            output_iter(
+                apply_mask(collect_dataset_values(&values_ds), mask).into_iter(),
+                false,
+            );
+            return;
+        }
+
+        die(&format!(
+            "unrecognised group structure for column '{}' in '{}'",
+            col_name, group_name
+        ));
     }
 
     // Column is a direct dataset.
@@ -995,7 +1066,9 @@ fn main() {
 
         if export_args.is_empty() {
             eprintln!("Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum");
-            eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>");
+            eprintln!(
+                "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
+            );
             process::exit(1);
         }
         let sub_cmd = export_args[0];
@@ -1063,7 +1136,9 @@ fn main() {
         eprintln!(
             "Usage: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape"
         );
-        eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>");
+        eprintln!(
+            "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
+        );
         process::exit(1);
     }
 
@@ -1122,7 +1197,16 @@ fn main() {
                     }
                 };
                 if section == "obs" || section == "var" {
-                    names.retain(|n| n != "_index" && n != "__categories");
+                    // Exclude the index dataset (named in the "_index" attr,
+                    // defaulting to "_index") and legacy __categories.
+                    let index_name = match group.attr("_index") {
+                        Ok(attr) => match attr.read_scalar::<hdf5_metno::types::VarLenUnicode>() {
+                            Ok(v) => v.as_str().to_string(),
+                            Err(_) => "_index".to_string(),
+                        },
+                        Err(_) => "_index".to_string(),
+                    };
+                    names.retain(|n| n != &index_name && n != "__categories");
                 }
                 names.sort_unstable();
                 for name in names {

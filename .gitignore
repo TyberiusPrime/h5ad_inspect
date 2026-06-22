@@ -1,3 +1,8 @@
 target*/
 result
 *.h5ad
+
+tests/__pycache__/
+.pytest_cache/
+h5ad_inspect/target/
+h5ad_inspect/target_claude/

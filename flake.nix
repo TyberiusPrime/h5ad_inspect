@@ -33,27 +33,40 @@
           cargo = rust;
           rustc = rust;
         };
+
+        mypython = pkgs.python3.withPackages (
+          ps: with ps; [
+            h5py
+            anndata
+            pytest
+          ]
+        );
       in
       rec {
-        packages.h5ad-inspect = (naersk-lib.buildPackage {
-          pname = "h5ad-inspect";
-          root = ./h5ad_inspect;
-          nativeBuildInputs = with pkgs; [ pkg-config ];
-          buildInputs = with pkgs; [ hdf5 ];
-          release = true;
-          CARGO_PROFILE_RELEASE_debug = "0";
-        }).overrideAttrs {
-          postInstall = ''
-            install -Dm644 ${./h5ad_inspect/completions/h5ad-inspect.fish} \
-              $out/share/fish/vendor_completions.d/h5ad-inspect.fish
-          '';
-        };
+        packages.h5ad-inspect =
+          (naersk-lib.buildPackage {
+            pname = "h5ad-inspect";
+            root = ./h5ad_inspect;
+            nativeBuildInputs = with pkgs; [ pkg-config ];
+            buildInputs = with pkgs; [ hdf5 ];
+            release = true;
+            CARGO_PROFILE_RELEASE_debug = "0";
+          }).overrideAttrs
+            {
+              postInstall = ''
+                install -Dm644 ${./h5ad_inspect/completions/h5ad-inspect.fish} \
+                  $out/share/fish/vendor_completions.d/h5ad-inspect.fish
+              '';
+            };
 
         packages.h5ad-inspect_other_linux =
           (naersk-lib.buildPackage {
             pname = "h5ad-inspect";
             root = ./h5ad_inspect;
-            nativeBuildInputs = with pkgs; [ pkg-config patchelf ];
+            nativeBuildInputs = with pkgs; [
+              pkg-config
+              patchelf
+            ];
             buildInputs = with pkgs; [ hdf5 ];
             release = true;
             CARGO_PROFILE_RELEASE_debug = "0";
@@ -100,6 +113,20 @@
           buildInputs = with pkgs; [ hdf5 ];
         };
 
+        # Cross-check every h5ad-inspect export against anndata itself.
+        # Runs via `nix flake check`.
+        checks.pytest = pkgs.runCommand "h5ad-inspect-pytest" {
+          buildInputs = [
+            mypython
+            packages.h5ad-inspect
+          ];
+          H5AD_INSPECT_BIN = "${packages.h5ad-inspect}/bin/h5ad-inspect";
+        } ''
+          export HOME="$TMPDIR"
+          ${mypython}/bin/python -m pytest ${./tests} -q -p no:cacheprovider --tb=short
+          touch "$out"
+        '';
+
         defaultPackage = packages.h5ad-inspect;
 
         apps.h5ad-inspect = utils.lib.mkApp { drv = packages.h5ad-inspect; };
@@ -116,6 +143,7 @@
             pkgs.mold
             pkgs.pkg-config
             pkgs.ripgrep
+            mypython
             rust
           ];
         };

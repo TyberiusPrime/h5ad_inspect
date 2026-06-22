@@ -56,7 +56,7 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `varsum` | — | sum of X across all obs, one value per var (col sums) |
 | `obsm` | key | a 2-D obsm embedding (e.g. `X_pca`, `X_umap`) in obs order; one tab-separated line per obs, `n_components` values per line |
 | `obs_categories` | column name | order of the categories  of this column |
-| `val_categories` | column name | order of the categories  of this column |
+| `var_categories` | column name | order of the categories  of this column |
 Categorical columns are decoded to their string labels.
 
 ```bash
