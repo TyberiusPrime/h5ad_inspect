@@ -103,6 +103,14 @@ complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
     -a row       -d 'Export X row by obs ID'
 complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
     -a column    -d 'Export X column by var ID'
+complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
+    -a obs_categories -d 'Categories of an obs column'
+complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
+    -a var_categories -d 'Categories of a var column'
+complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
+    -a obs_encoding -d 'h5ad encoding of an obs column (JSON)'
+complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
+    -a var_encoding -d 'h5ad encoding of a var column (JSON)'
 
 # ── Dynamic name completions ──────────────────────────────────────────────────
 
@@ -114,6 +122,16 @@ complete -c h5ad-inspect \
 # After "export var": complete var column names from the file.
 complete -c h5ad-inspect \
     -n 'set -l __sc (__h5ad_export_subcmd 2>/dev/null); test "$__sc" = var' -f \
+    -a '(__h5ad_run var)'
+
+# After "export obs_categories"/"obs_encoding": complete obs column names.
+complete -c h5ad-inspect \
+    -n 'set -l __sc (__h5ad_export_subcmd 2>/dev/null); contains -- "$__sc" obs_categories obs_encoding' -f \
+    -a '(__h5ad_run obs)'
+
+# After "export var_categories"/"var_encoding": complete var column names.
+complete -c h5ad-inspect \
+    -n 'set -l __sc (__h5ad_export_subcmd 2>/dev/null); contains -- "$__sc" var_categories var_encoding' -f \
     -a '(__h5ad_run var)'
 
 # After "export row": complete obs index values (cell IDs) from the file.

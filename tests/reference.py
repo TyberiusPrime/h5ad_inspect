@@ -89,3 +89,59 @@ def expected_varsum(adata) -> np.ndarray:
 
 def expected_obsm(adata, key: str) -> np.ndarray:
     return np.asarray(adata.obsm[key]).astype(float)
+
+
+def expected_encoding(path, group: str, col: str) -> dict:
+    """Reference h5ad encoding for a column, read straight from the file.
+
+    Mirrors the h5py-based ``_col_encoding``: ``categorical`` / ``bool`` /
+    ``numeric``. Categorical columns also carry their in-order ``categories``
+    (decoded the same way the tool decodes them, with masked entries → "NA").
+    """
+    import h5py
+
+    def _decode(v) -> str:
+        if isinstance(v, bytes):
+            return v.decode()
+        return str(v)
+
+    with h5py.File(path, "r") as f:
+        grp = f.get(group)
+        enc = "numeric"
+        if isinstance(grp, h5py.Group) and col in grp:
+            item = grp[col]
+            if isinstance(item, h5py.Group):
+                e = item.attrs.get("encoding-type", b"")
+                if isinstance(e, bytes):
+                    e = e.decode()
+                if e == "categorical":
+                    enc = "categorical"
+            elif isinstance(item, h5py.Dataset) and item.dtype.kind == "b":
+                enc = "bool"
+
+        out: dict[str, object] = {"encoding": enc}
+        if enc == "categorical":
+            cat = f.get(f"{group}/{col}/categories")
+            cats: list[str] = []
+            if isinstance(cat, h5py.Dataset):
+                cats = [_decode(v) for v in np.asarray(cat[()]).ravel()]
+            elif isinstance(cat, h5py.Group):
+                vals_ds = cat.get("values")
+                vals = (
+                    np.asarray(vals_ds[()]).ravel()
+                    if isinstance(vals_ds, h5py.Dataset)
+                    else np.asarray([])
+                )
+                mask_ds = cat.get("mask")
+                mask = (
+                    np.asarray(mask_ds[()]).ravel()
+                    if isinstance(mask_ds, h5py.Dataset)
+                    else None
+                )
+                for i, v in enumerate(vals):
+                    if mask is not None and mask[i]:
+                        cats.append("NA")
+                    else:
+                        cats.append(_decode(v))
+            out["categories"] = cats
+        return out

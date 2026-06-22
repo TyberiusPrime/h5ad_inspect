@@ -8,6 +8,8 @@ layout, so all of these run against the dense variant.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -70,3 +72,45 @@ def test_export_nonexistent_column_errors(h5ad_inspect, dense):
     cp = run(h5ad_inspect, path, "export", "var", "this_column_does_not_exist",
              expect_ok=False)
     assert cp.returncode != 0
+
+
+@pytest.mark.parametrize("group,col", [
+    *(("obs", c) for c in ["of64", "of32", "oi32", "oi8", "ou8", "obool",
+                           "ostr", "ocat", "ocatord", "onint", "ofnan"]),
+    *(("var", c) for c in ["vf64", "vf32", "vi64", "vi16", "vi8", "vu8", "vbool",
+                           "vstr", "vcat", "vnint", "vnstr", "vfnan"]),
+])
+def test_export_encoding(h5ad_inspect, dense, group, col):
+    """obs_encoding/var_encoding emit JSON matching the h5py reference."""
+    adata, path = dense
+    got = json.loads(
+        run(h5ad_inspect, path, "export", f"{group}_encoding", col).stdout.decode()
+    )
+    expected = ref.expected_encoding(path, group, col)
+    assert got == expected, (group, col, got, expected)
+
+
+def test_export_encoding_missing_column_is_numeric(h5ad_inspect, dense):
+    """A missing column resolves to numeric (mirrors the h5py reference)."""
+    _, path = dense
+    got = json.loads(
+        run(h5ad_inspect, path, "export", "obs_encoding",
+            "this_column_does_not_exist").stdout.decode()
+    )
+    assert got == {"encoding": "numeric"}
+
+
+@pytest.mark.parametrize("special", ['"', "\\", "\n", "\t", "café"])
+def test_export_encoding_escapes_categories(h5ad_inspect, files, special):
+    """Category strings must be valid JSON regardless of special characters."""
+    adata, base_path = files["dense"]
+    n_obs = adata.shape[0]
+    # Rewrite with a categorical whose category contains special characters.
+    path = base_path.with_name("special_cat.h5ad")
+    a = adata.copy()
+    vals = [special if i % 2 == 0 else "plain" for i in range(n_obs)]
+    a.obs["sp"] = pd.Categorical(vals, categories=[special, "plain"])
+    a.write_h5ad(path)
+    got = json.loads(run(h5ad_inspect, path, "export", "obs_encoding", "sp").stdout.decode())
+    assert got["encoding"] == "categorical"
+    assert got["categories"] == [special, "plain"]

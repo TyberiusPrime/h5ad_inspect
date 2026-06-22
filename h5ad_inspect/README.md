@@ -57,6 +57,8 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `obsm` | key | a 2-D obsm embedding (e.g. `X_pca`, `X_umap`) in obs order; one tab-separated line per obs, `n_components` values per line |
 | `obs_categories` | column name | order of the categories  of this column |
 | `var_categories` | column name | order of the categories  of this column |
+| `obs_encoding` | column name | JSON object with the column's h5ad encoding (`categorical`, `bool`, or `numeric`); `categorical` columns also include an in-order `categories` array |
+| `var_encoding` | column name | JSON object with the column's h5ad encoding (`categorical`, `bool`, or `numeric`); `categorical` columns also include an in-order `categories` array |
 Categorical columns are decoded to their string labels.
 
 ```bash
@@ -78,6 +80,29 @@ h5ad-inspect data.h5ad export varsum
 # Export a 2-D embedding in obs order (one tab-separated row per cell)
 h5ad-inspect data.h5ad export obsm X_umap
 ```
+
+### Column encoding (`obs_encoding` / `var_encoding`)
+
+Emits a single JSON object describing how a column is stored, so callers can
+branch on dtype without reading the whole column:
+
+```bash
+# A categorical column includes its categories, in order:
+$ h5ad-inspect data.h5ad export obs_encoding cell_type
+{"encoding":"categorical","categories":["alpha","beta","gamma"]}
+
+# Boolean and numeric columns carry only the encoding:
+$ h5ad-inspect data.h5ad export obs_encoding n_counts
+{"encoding":"numeric"}
+$ h5ad-inspect data.h5ad export obs_encoding is_control
+{"encoding":"bool"}
+```
+
+The classification matches the on-disk `encoding-type` attribute: a child group
+marked `categorical` is `categorical` (plain string columns are categorical in
+recent anndata), a child boolean dataset is `bool`, and everything else
+(including nullable-integer groups) is `numeric`. A missing column resolves to
+`numeric`.
 
 ### Binary float output (`--binary`)
 

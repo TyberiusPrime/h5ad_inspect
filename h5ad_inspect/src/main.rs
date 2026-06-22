@@ -576,6 +576,119 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Column encoding classification
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Classify a column's h5ad encoding as ``"categorical"``, ``"bool"``, or
+// ``"numeric"``, matching the h5py-based reference: a child group whose
+// ``encoding-type`` attribute is ``"categorical"`` is categorical; a child
+// bool dataset is bool; everything else is numeric. For categorical columns
+// the in-order category labels are returned alongside.
+fn col_encoding(
+    file: &hdf5_metno::File,
+    group_name: &str,
+    col_name: &str,
+) -> (String, Option<Vec<String>>) {
+    let group_loc = match file.loc_type_by_name(group_name) {
+        Ok(t) => t,
+        Err(_) => return ("numeric".to_string(), None),
+    };
+
+    if group_loc == hdf5_metno::LocationType::Group {
+        let col_path = format!("{}/{}", group_name, col_name);
+        match file.loc_type_by_name(&col_path) {
+            Ok(hdf5_metno::LocationType::Group) => {
+                let is_cat = file
+                    .group(&col_path)
+                    .ok()
+                    .and_then(|g| g.attr("encoding-type").ok())
+                    .and_then(|a| a.read_scalar::<hdf5_metno::types::VarLenUnicode>().ok())
+                    .map(|v| v.as_str() == "categorical")
+                    .unwrap_or(false);
+                if is_cat {
+                    let cats = read_categories(file, &format!("{}/categories", col_path))
+                        .unwrap_or_default();
+                    ("categorical".to_string(), Some(cats))
+                } else {
+                    ("numeric".to_string(), None)
+                }
+            }
+            Ok(hdf5_metno::LocationType::Dataset) => {
+                let is_bool = file
+                    .dataset(&col_path)
+                    .ok()
+                    .and_then(|d| d.dtype().ok())
+                    .and_then(|t| t.to_descriptor().ok())
+                    .map(|d| matches!(d, TypeDescriptor::Boolean))
+                    .unwrap_or(false);
+                if is_bool {
+                    ("bool".to_string(), None)
+                } else {
+                    ("numeric".to_string(), None)
+                }
+            }
+            _ => ("numeric".to_string(), None),
+        }
+    } else {
+        // Old-style compound dataset: classify via the field's type.
+        let is_bool = file
+            .dataset(group_name)
+            .ok()
+            .and_then(|d| d.dtype().ok())
+            .and_then(|t| t.to_descriptor().ok())
+            .and_then(|desc| match desc {
+                TypeDescriptor::Compound(ct) => ct
+                    .fields
+                    .iter()
+                    .find(|f| f.name == col_name)
+                    .map(|f| matches!(f.ty, TypeDescriptor::Boolean)),
+                _ => None,
+            })
+            .unwrap_or(false);
+        if is_bool {
+            ("bool".to_string(), None)
+        } else {
+            ("numeric".to_string(), None)
+        }
+    }
+}
+
+fn json_escape_into(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+fn print_encoding_json(encoding: &str, categories: Option<&[String]>) {
+    let mut s = String::from("{\"encoding\":");
+    json_escape_into(encoding, &mut s);
+    if let Some(cats) = categories {
+        s.push_str(",\"categories\":[");
+        for (i, c) in cats.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            json_escape_into(c, &mut s);
+        }
+        s.push(']');
+    }
+    s.push('}');
+    println!("{}", s);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // X matrix helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1116,6 +1229,14 @@ fn main() {
             "var" => export_obs_var_column(&file, "var", name),
             "obs_categories" => export_obs_var_categories(&file, "obs", name),
             "var_categories" => export_obs_var_categories(&file, "var", name),
+            "obs_encoding" => {
+                let (enc, cats) = col_encoding(&file, "obs", name);
+                print_encoding_json(&enc, cats.as_deref());
+            }
+            "var_encoding" => {
+                let (enc, cats) = col_encoding(&file, "var", name);
+                print_encoding_json(&enc, cats.as_deref());
+            }
             "row" => export_x_row(&file, name, binary),
             "column" => export_x_column(&file, name, binary),
             "obssum" => export_x_obssum(&file, binary),
@@ -1123,7 +1244,7 @@ fn main() {
             "obsm" => export_obsm(&file, name, binary),
             _ => {
                 eprintln!(
-                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, row, column, obssum, varsum, or obsm"
+                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, obs_encoding, var_encoding, row, column, obssum, varsum, or obsm"
                 );
                 process::exit(1);
             }
