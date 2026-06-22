@@ -11,3 +11,10 @@ path = "src/main.rs"
 hdf5-metno = "0.12"
 hdf5-metno-sys = "0.11"
 ndarray = "0.17"
+
+[features]
+# Bundle and build HDF5 from source (via hdf5-src). Enables hermetic cargo
+# builds on runners without a system HDF5 (macOS, Windows). The Nix build
+# uses the system HDF5 and does not need this.
+default = []
+static = ["hdf5-metno/static"]

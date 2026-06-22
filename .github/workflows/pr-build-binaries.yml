@@ -1,0 +1,83 @@
+name: Build PR Binaries
+
+env:
+  PROJECT_NAME: h5ad-inspect
+  CARGO_TARGET_DIR: target
+  GITHUB_ACTIONS: true
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build_binaries:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_target: false
+            artifact_path: target/release
+            bin_suffix: ""
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            use_target: true
+            artifact_path: target/aarch64-apple-darwin/release
+            bin_suffix: ""
+          - name: win-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_target: true
+            artifact_path: target/x86_64-pc-windows-msvc/release
+            bin_suffix: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set COMMIT_HASH
+        shell: bash
+        run: echo "COMMIT_HASH=${{ github.sha }}" >> $GITHUB_ENV
+
+      # hdf5-metno-sys `static` feature builds HDF5 from source via cmake,
+      # so no system HDF5 / pkg-config is needed on any runner.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.target }}
+
+      - name: Setup Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: "h5ad_inspect -> target"
+          key: ${{ matrix.name }}
+
+      # - name: Setup tmate session
+      #   uses: mxschmitt/action-tmate@v3
+
+      - name: Run Tests (Release)
+        shell: bash
+        run: cargo test --verbose --locked --release --features static --manifest-path h5ad_inspect/Cargo.toml
+
+      - name: Build Binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.use_target }}" == "true" ]]; then
+            cargo build --verbose --locked --release --features static --target ${{ matrix.target }} --manifest-path h5ad_inspect/Cargo.toml
+          else
+            cargo build --verbose --locked --release --features static --manifest-path h5ad_inspect/Cargo.toml
+          fi
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PROJECT_NAME }}-${{ matrix.name }}
+          path: ${{ matrix.artifact_path }}/${{ env.PROJECT_NAME }}${{ matrix.bin_suffix }}

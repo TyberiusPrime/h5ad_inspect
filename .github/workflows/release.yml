@@ -1,0 +1,227 @@
+name: Release
+
+env:
+  PROJECT_NAME: h5ad-inspect
+  CARGO_TARGET_DIR: target
+  GITHUB_ACTIONS: true
+
+on:
+  push:
+    tags:
+      - 'v*' # Triggers on any tag that starts with 'v'
+
+jobs:
+  build:
+    permissions:
+      contents: write
+      packages: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify tag matches version
+        run: |
+          # Extract version from the Rust package manifest.
+          BINARY_REPORTED_VERSION=v$(grep '^\s*version' h5ad_inspect/Cargo.toml | head -n1 | cut -d '"' -f2)
+          echo "Found version: $BINARY_REPORTED_VERSION"
+          if [ "${GITHUB_REF}" != "refs/tags/$BINARY_REPORTED_VERSION" ]; then
+            echo "Tag does not match version. Aborting."
+            exit 1
+          fi
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+
+      - name: Cargo tests
+        run: nix build -L .#test
+
+      - name: Pytest (compare every export to anndata)
+        run: nix build -L .#checks.x86_64-linux.pytest
+
+      - name: Build Linux binary
+        run: nix build .#h5ad-inspect_other_linux -o result-linux
+
+      - name: Build Docker image
+        run: |
+          nix build .#h5ad-inspect-docker -o result-docker
+          docker load < result-docker
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Docker image to GHCR
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          owner_lc=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner_lc}/h5ad-inspect"
+          base="h5ad-inspect:latest"
+
+          docker tag "$base" "$image:${REF_NAME}"
+          docker push "$image:${REF_NAME}"
+
+          stripped="${REF_NAME#v}"
+          if [ "$stripped" != "$REF_NAME" ]; then
+            docker tag "$base" "$image:${stripped}"
+            docker push "$image:${stripped}"
+          fi
+
+          docker tag "$base" "$image:latest"
+          docker push "$image:latest"
+
+      - name: Upload Linux binary as artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-binary
+          path: ./result-linux/bin/h5ad-inspect
+
+
+  build_platforms:
+    # Set the job to run on the platform specified by the matrix below
+    runs-on: ${{ matrix.runner }}
+    needs: build
+
+    # Define the build matrix for cross-compilation
+    strategy:
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: win-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    # The steps to run for each matrix item
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set COMMIT_HASH
+        shell: bash
+        run: echo "COMMIT_HASH=${{ github.sha }}" >> $GITHUB_ENV
+
+      # hdf5-metno-sys `static` feature builds HDF5 from source via cmake,
+      # so no system HDF5 / pkg-config is needed on any runner.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.93.1
+          targets: "${{ matrix.target }}"
+
+      - name: Setup Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: "h5ad_inspect -> target"
+          key: ${{ matrix.name }}
+
+      - name: Run Tests (Release)
+        shell: bash
+        run: cargo test --verbose --locked --release --features static --manifest-path h5ad_inspect/Cargo.toml
+
+      - name: Build Binary
+        shell: bash
+        run: cargo build --verbose --locked --release --features static --target ${{ matrix.target }} --manifest-path h5ad_inspect/Cargo.toml
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.name }}-binary
+          path: target/${{ matrix.target }}/release/${{ env.PROJECT_NAME }}${{ matrix.runner == 'windows-latest' && '.exe' || '' }}
+
+
+  publish-crate:
+    name: Publish to crates.io
+    environment: release
+    runs-on: ubuntu-latest
+    needs: [build, build_platforms]  # Ensure all platforms and tests pass before publishing
+    permissions:
+      id-token: write  # Required for trusted publishing (OIDC token exchange)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
+        with:
+          toolchain: 1.93.1
+
+      - name: Authenticate to crates.io (trusted publishing)
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+
+      - name: Publish to crates.io
+        run: |
+          output=$(cargo publish --manifest-path h5ad_inspect/Cargo.toml 2>&1) && echo "$output" || {
+            echo "$output"
+            echo "$output" | grep -q 'already exists on crates.io index' || exit 1
+            echo "Version already published to crates.io, treating as success."
+          }
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, build_platforms, publish-crate]  # Wait for ALL jobs to complete
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts/
+
+      - name: Display artifact structure
+        run: ls -R artifacts/
+
+      - name: Rename binaries with target information
+        run: |
+          # Create a directory for renamed binaries
+          mkdir -p release-binaries
+
+          # Rename Linux binary (x86_64-unknown-linux-musl, but patched to work on gnu systems)
+          cp artifacts/linux-binary/h5ad-inspect release-binaries/h5ad-inspect-x86_64-unknown-linux-gnu
+
+          # Rename macOS binary
+          cp artifacts/macos-arm64-binary/h5ad-inspect release-binaries/h5ad-inspect-aarch64-apple-darwin
+
+          # Rename Windows binary
+          cp artifacts/win-amd64-binary/h5ad-inspect.exe release-binaries/h5ad-inspect-x86_64-pc-windows-msvc.exe
+
+          # Display renamed binaries
+          ls -lh release-binaries/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          files: |
+            release-binaries/h5ad-inspect-x86_64-unknown-linux-gnu
+            release-binaries/h5ad-inspect-aarch64-apple-darwin
+            release-binaries/h5ad-inspect-x86_64-pc-windows-msvc.exe
