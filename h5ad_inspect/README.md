@@ -54,6 +54,7 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `column` | var ID | X matrix column for that gene (one value per cell) |
 | `obssum` | — | sum of X across all vars, one value per obs (row sums) |
 | `varsum` | — | sum of X across all obs, one value per var (col sums) |
+| `obsm` | key | a 2-D obsm embedding (e.g. `X_pca`, `X_umap`) in obs order; one tab-separated line per obs, `n_components` values per line |
 | `obs_categories` | column name | order of the categories  of this column |
 | `val_categories` | column name | order of the categories  of this column |
 Categorical columns are decoded to their string labels.
@@ -73,13 +74,19 @@ h5ad-inspect data.h5ad export obssum
 
 # Sum X across all cells per gene (total counts per gene)
 h5ad-inspect data.h5ad export varsum
+
+# Export a 2-D embedding in obs order (one tab-separated row per cell)
+h5ad-inspect data.h5ad export obsm X_umap
 ```
 
 ### Binary float output (`--binary`)
 
-For `row`, `column`, `obssum`, and `varsum` exports, passing `--binary` writes
-raw little-endian `float64` bytes to stdout instead of newline-separated text.
-This is the fastest path into NumPy — no text parsing overhead.
+For `row`, `column`, `obssum`, `varsum`, and `obsm` exports, passing `--binary`
+writes raw little-endian `float64` bytes to stdout instead of newline-separated
+text. This is the fastest path into NumPy — no text parsing overhead.
+
+For `obsm`, the binary stream is row-major: `n_obs * n_components` float64
+values, so reshape with `.reshape(n_obs, n_components)` on load.
 
 ```bash
 h5ad-inspect data.h5ad export --binary row AAACCTGAGAAGGCCT-1 \
@@ -91,11 +98,12 @@ Or save to a file and load later:
 ```python
 import subprocess, numpy as np
 
+# 2-D embedding via binary obsm
 result = subprocess.run(
-    ["h5ad-inspect", "data.h5ad", "export", "--binary", "column", "GAPDH"],
+    ["h5ad-inspect", "data.h5ad", "export", "--binary", "obsm", "X_umap"],
     capture_output=True,
 )
-expr = np.frombuffer(result.stdout, dtype="<f8")
+emb = np.frombuffer(result.stdout, dtype="<f8").reshape(-1, 2)
 ```
 
 The output is always `float64` regardless of the on-disk dtype (float32, int32, etc.).

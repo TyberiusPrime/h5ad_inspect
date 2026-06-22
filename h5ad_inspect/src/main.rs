@@ -899,6 +899,81 @@ fn export_x_column(file: &hdf5_metno::File, var_idx_val: &str, binary: bool) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// obsm (multi-dimensional obs annotations)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Export a 2-D obsm dataset (e.g. X_pca, X_umap) in obs order.
+// Text: one tab-separated line per obs, n_components columns per line.
+// --binary: row-major little-endian float64 (n_obs * n_components values).
+fn export_obsm(file: &hdf5_metno::File, name: &str, binary: bool) {
+    let ds_path = format!("obsm/{}", name);
+    let ds = file
+        .dataset(&ds_path)
+        .unwrap_or_else(|e| die(&format!("cannot open '{}': {}", ds_path, e)));
+
+    let shape = ds.shape();
+    if shape.len() != 2 {
+        die(&format!(
+            "'{}' is not 2-D (got {} dimension{})",
+            ds_path,
+            shape.len(),
+            if shape.len() == 1 { "" } else { "s" }
+        ));
+    }
+    let n_obs = shape[0];
+    let n_components = shape[1];
+
+    let desc = ds
+        .dtype()
+        .and_then(|d| d.to_descriptor())
+        .unwrap_or_else(|e| die(&format!("obsm dtype: {}", e)));
+
+    macro_rules! emit {
+        ($T:ty) => {{
+            let arr = ds
+                .read_2d::<$T>()
+                .unwrap_or_else(|e| die(&format!("obsm read: {}", e)));
+            if binary {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                for i in 0..n_obs {
+                    for j in 0..n_components {
+                        let v = arr[[i, j]] as f64;
+                        out.write_all(&v.to_le_bytes())
+                            .unwrap_or_else(|e| die(&format!("write: {}", e)));
+                    }
+                }
+            } else {
+                for i in 0..n_obs {
+                    let mut line = String::with_capacity(n_components * 8);
+                    for j in 0..n_components {
+                        if j > 0 {
+                            line.push('\t');
+                        }
+                        line.push_str(&format!("{}", arr[[i, j]]));
+                    }
+                    println!("{}", line);
+                }
+            }
+        }};
+    }
+
+    match desc {
+        TypeDescriptor::Float(FloatSize::U4) => emit!(f32),
+        TypeDescriptor::Float(FloatSize::U8) => emit!(f64),
+        TypeDescriptor::Integer(IntSize::U1) => emit!(i8),
+        TypeDescriptor::Integer(IntSize::U2) => emit!(i16),
+        TypeDescriptor::Integer(IntSize::U4) => emit!(i32),
+        TypeDescriptor::Integer(IntSize::U8) => emit!(i64),
+        TypeDescriptor::Unsigned(IntSize::U1) => emit!(u8),
+        TypeDescriptor::Unsigned(IntSize::U2) => emit!(u16),
+        TypeDescriptor::Unsigned(IntSize::U4) => emit!(u32),
+        TypeDescriptor::Unsigned(IntSize::U8) => emit!(u64),
+        _ => die(&format!("unsupported dtype for obsm '{}'", name)),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -920,7 +995,7 @@ fn main() {
 
         if export_args.is_empty() {
             eprintln!("Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum");
-            eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>");
+            eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>");
             process::exit(1);
         }
         let sub_cmd = export_args[0];
@@ -972,9 +1047,10 @@ fn main() {
             "column" => export_x_column(&file, name, binary),
             "obssum" => export_x_obssum(&file, binary),
             "varsum" => export_x_varsum(&file, binary),
+            "obsm" => export_obsm(&file, name, binary),
             _ => {
                 eprintln!(
-                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, row, column, obssum, or varsum"
+                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, row, column, obssum, varsum, or obsm"
                 );
                 process::exit(1);
             }
@@ -987,7 +1063,7 @@ fn main() {
         eprintln!(
             "Usage: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape"
         );
-        eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column <name>");
+        eprintln!("       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>");
         process::exit(1);
     }
 
