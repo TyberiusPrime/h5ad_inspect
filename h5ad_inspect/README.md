@@ -54,6 +54,8 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `column` | var ID | X matrix column for that gene (one value per cell) |
 | `obssum` | — | sum of X across all vars, one value per obs (row sums) |
 | `varsum` | — | sum of X across all obs, one value per var (col sums) |
+| `matrix_csr` | — | full X matrix as a NumPy `.npz` stream in CSR (`data`/`indices`/`indptr`/`shape`); see [Full matrix](#full-matrix-csr--csc-numpy-npz) |
+| `matrix_csc` | — | full X matrix as a NumPy `.npz` stream in CSC (`data`/`indices`/`indptr`/`shape`); see [Full matrix](#full-matrix-csr--csc-numpy-npz) |
 | `obsm` | key | a 2-D obsm embedding (e.g. `X_pca`, `X_umap`) in obs order; one tab-separated line per obs, `n_components` values per line |
 | `obs_categories` | column name | order of the categories  of this column |
 | `var_categories` | column name | order of the categories  of this column |
@@ -80,6 +82,61 @@ h5ad-inspect data.h5ad export varsum
 # Export a 2-D embedding in obs order (one tab-separated row per cell)
 h5ad-inspect data.h5ad export obsm X_umap
 ```
+
+### Full matrix (CSR / CSC, NumPy `.npz`)
+
+`export matrix_csr` and `export matrix_csc` each stream the **entire X matrix**
+to stdout as a NumPy `.npz` archive holding a single sparse representation,
+regardless of how X is stored on disk (dense, CSR, or CSC):
+
+`matrix_csr` members:
+
+| Member | dtype | contents |
+|---|---|---|
+| `csr_data` | float64 | CSR data |
+| `csr_indices` | int64 | CSR column indices |
+| `csr_indptr` | int64 | CSR row pointers (`n_obs + 1`) |
+| `csr_shape` | int64 | `(n_obs, n_var)` |
+
+`matrix_csc` members:
+
+| Member | dtype | contents |
+|---|---|---|
+| `csc_data` | float64 | CSC data |
+| `csc_indices` | int64 | CSC row indices |
+| `csc_indptr` | int64 | CSC column pointers (`n_var + 1`) |
+| `csc_shape` | int64 | `(n_obs, n_var)` |
+
+Output is always binary (the `.npz`); `--binary` is not required. Values are
+promoted to float64 whatever the on-disk dtype. The archive is written
+uncompressed (ZIP STORED); total archive size is limited to 4 GiB.
+
+```bash
+# Save to a file, then load directly with numpy/scipy
+h5ad-inspect data.h5ad export matrix_csr > x_csr.npz
+h5ad-inspect data.h5ad export matrix_csc > x_csc.npz
+```
+
+```python
+import io, subprocess, numpy as np, scipy.sparse as sp
+
+# Capture the stream straight from the process
+buf = subprocess.run(
+    ["h5ad-inspect", "data.h5ad", "export", "matrix_csr"], capture_output=True
+).stdout
+z = np.load(io.BytesIO(buf))
+
+csr = sp.csr_matrix(
+    (z["csr_data"], z["csr_indices"], z["csr_indptr"]),
+    shape=tuple(z["csr_shape"]),
+)
+# matrix_csc is identical except the members are csc_* and you use sp.csc_matrix.
+```
+
+A dense-stored X is emitted as a fully-populated CSR/CSC (every entry kept, so
+`nnz == n_obs * n_var`); a sparse-stored X keeps only its stored nonzeros. The
+on-disk format and the requested format are independent — e.g.
+`export matrix_csc` on a CSR-stored X transposes once to produce CSC.
 
 ### Column encoding (`obs_encoding` / `var_encoding`)
 

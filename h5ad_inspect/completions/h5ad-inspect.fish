@@ -111,6 +111,10 @@ complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
     -a obs_encoding -d 'h5ad encoding of an obs column (JSON)'
 complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
     -a var_encoding -d 'h5ad encoding of a var column (JSON)'
+complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
+    -a matrix_csr -d 'Full X matrix as NumPy .npz (CSR)'
+complete -c h5ad-inspect -n '__h5ad_needs_export_subcmd' -f \
+    -a matrix_csc -d 'Full X matrix as NumPy .npz (CSC)'
 
 # ── Dynamic name completions ──────────────────────────────────────────────────
 

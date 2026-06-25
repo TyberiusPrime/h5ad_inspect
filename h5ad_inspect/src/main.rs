@@ -1158,6 +1158,373 @@ fn export_obsm(file: &hdf5_metno::File, name: &str, binary: bool) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Full X matrix export — CSR / CSC as streamed NumPy .npz archives
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Minimal CRC-32 (IEEE 802.3, reflected poly 0xEDB88320) for ZIP entries.
+fn crc32(data: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for i in 0..256u32 {
+        let mut c = i;
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                0xEDB88320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+        table[i as usize] = c;
+    }
+    let mut crc = 0xFFFFFFFFu32;
+    for &b in data {
+        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFFFFFF
+}
+
+struct ZipEntry {
+    name: String,
+    bytes: Vec<u8>,
+}
+
+// Stream a STORED (uncompressed) ZIP archive to `w`. Each entry's payload is a
+// complete .npy file. Uses 32-bit offsets/sizes (≤4 GiB total archive).
+fn write_zip<W: Write>(w: &mut W, entries: &[ZipEntry]) {
+    // (name, crc, size, local-header offset) per entry, for the central dir.
+    let mut central: Vec<(Vec<u8>, u32, u32, u32)> = Vec::new();
+    let mut offset: u32 = 0;
+
+    for e in entries {
+        let crc = crc32(&e.bytes);
+        let size = e.bytes.len() as u32;
+        let name = e.name.as_bytes();
+        let mut lh = Vec::with_capacity(30 + name.len());
+        lh.extend_from_slice(&0x04034b50u32.to_le_bytes()); // local file header sig
+        lh.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        lh.extend_from_slice(&0u16.to_le_bytes()); // flags
+        lh.extend_from_slice(&0u16.to_le_bytes()); // method (stored)
+        lh.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        lh.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        lh.extend_from_slice(&crc.to_le_bytes());
+        lh.extend_from_slice(&size.to_le_bytes()); // compressed size
+        lh.extend_from_slice(&size.to_le_bytes()); // uncompressed size
+        lh.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        lh.extend_from_slice(&0u16.to_le_bytes()); // extra field len
+        lh.extend_from_slice(name);
+        w.write_all(&lh)
+            .unwrap_or_else(|e| die(&format!("write: {}", e)));
+        w.write_all(&e.bytes)
+            .unwrap_or_else(|e| die(&format!("write: {}", e)));
+        central.push((name.to_vec(), crc, size, offset));
+        offset = offset.saturating_add(lh.len() as u32).saturating_add(size);
+    }
+
+    let cd_start = offset;
+    let mut cd_size: u32 = 0;
+    for (name, crc, size, lh_offset) in &central {
+        let mut h = Vec::with_capacity(46 + name.len());
+        h.extend_from_slice(&0x02014b50u32.to_le_bytes()); // central dir header sig
+        h.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        h.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        h.extend_from_slice(&0u16.to_le_bytes()); // flags
+        h.extend_from_slice(&0u16.to_le_bytes()); // method
+        h.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        h.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        h.extend_from_slice(&crc.to_le_bytes());
+        h.extend_from_slice(&size.to_le_bytes()); // compressed size
+        h.extend_from_slice(&size.to_le_bytes()); // uncompressed size
+        h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        h.extend_from_slice(&0u16.to_le_bytes()); // extra
+        h.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        h.extend_from_slice(&0u16.to_le_bytes()); // disk start
+        h.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        h.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        h.extend_from_slice(&lh_offset.to_le_bytes()); // local header offset
+        h.extend_from_slice(name);
+        w.write_all(&h)
+            .unwrap_or_else(|e| die(&format!("write: {}", e)));
+        cd_size = cd_size.saturating_add(h.len() as u32);
+    }
+
+    let mut eocd = Vec::with_capacity(22);
+    eocd.extend_from_slice(&0x06054b50u32.to_le_bytes()); // EOCD sig
+    eocd.extend_from_slice(&0u16.to_le_bytes()); // this disk
+    eocd.extend_from_slice(&0u16.to_le_bytes()); // disk with cd
+    eocd.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    eocd.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    eocd.extend_from_slice(&cd_size.to_le_bytes());
+    eocd.extend_from_slice(&cd_start.to_le_bytes());
+    eocd.extend_from_slice(&0u16.to_le_bytes()); // comment len
+    w.write_all(&eocd)
+        .unwrap_or_else(|e| die(&format!("write: {}", e)));
+}
+
+// Build a NumPy v1.0 .npy header (magic + version + length + padded dict),
+// without the data payload.
+fn npy_header(descr: &str, shape: &[u64]) -> Vec<u8> {
+    let shape_str = match shape.len() {
+        0 => "()".to_string(),
+        1 => format!("({},)", shape[0]),
+        _ => {
+            let parts: Vec<String> = shape.iter().map(|x| x.to_string()).collect();
+            format!("({})", parts.join(", "))
+        }
+    };
+    let dict = format!(
+        "{{'descr': '{}', 'fortran_order': False, 'shape': {}, }}",
+        descr, shape_str
+    );
+    let mut h = dict.into_bytes();
+    let mut pad = 1; // reserve the trailing newline
+    while (10 + h.len() + pad) % 64 != 0 {
+        pad += 1;
+    }
+    h.resize(h.len() + pad - 1, b' ');
+    h.push(b'\n');
+
+    let mut out = Vec::with_capacity(10 + h.len());
+    out.extend_from_slice(b"\x93NUMPY");
+    out.push(1);
+    out.push(0);
+    out.extend_from_slice(&(h.len() as u16).to_le_bytes());
+    out.extend_from_slice(&h);
+    out
+}
+
+fn npy_f64(vals: &[f64]) -> Vec<u8> {
+    let mut out = npy_header("<f8", &[vals.len() as u64]);
+    for &v in vals {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+// Integer indices/indptr are emitted as little-endian int64.
+fn npy_i64(vals: &[usize]) -> Vec<u8> {
+    let mut out = npy_header("<i8", &[vals.len() as u64]);
+    for &v in vals {
+        out.extend_from_slice(&(v as i64).to_le_bytes());
+    }
+    out
+}
+
+fn npy_shape2(n_rows: usize, n_cols: usize) -> Vec<u8> {
+    let mut out = npy_header("<i8", &[2]);
+    out.extend_from_slice(&(n_rows as i64).to_le_bytes());
+    out.extend_from_slice(&(n_cols as i64).to_le_bytes());
+    out
+}
+
+// Read a dense 2-D X dataset into row-major f64.
+fn read_dense_x_full(file: &hdf5_metno::File) -> Vec<f64> {
+    let ds = file
+        .dataset("X")
+        .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+    let shape = ds.shape();
+    if shape.len() != 2 {
+        die("X is not a 2-D dataset");
+    }
+    let (n_obs, n_var) = (shape[0], shape[1]);
+    let desc = ds
+        .dtype()
+        .and_then(|d| d.to_descriptor())
+        .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
+    macro_rules! rd {
+        ($T:ty) => {{
+            let a = ds
+                .read_2d::<$T>()
+                .unwrap_or_else(|e| die(&format!("X read: {}", e)));
+            let mut v = Vec::with_capacity(n_obs * n_var);
+            for i in 0..n_obs {
+                for j in 0..n_var {
+                    v.push(a[[i, j]] as f64);
+                }
+            }
+            v
+        }};
+    }
+    match desc {
+        TypeDescriptor::Float(FloatSize::U4) => rd!(f32),
+        TypeDescriptor::Float(FloatSize::U8) => rd!(f64),
+        TypeDescriptor::Integer(IntSize::U4) => rd!(i32),
+        TypeDescriptor::Unsigned(IntSize::U4) => rd!(u32),
+        _ => die("unsupported dense X dtype"),
+    }
+}
+
+// Transpose CSR arrays of an (n_rows × n_cols) matrix into CSR arrays of its
+// (n_cols × n_rows) transpose, via counting sort. The output indices within
+// each column are in ascending row order (canonical). Used to derive CSC from
+// CSR and vice-versa.
+fn transpose_csr(
+    n_rows: usize,
+    n_cols: usize,
+    indptr: &[usize],
+    indices: &[usize],
+    data: &[f64],
+) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    let mut counts = vec![0usize; n_cols];
+    for &c in indices {
+        counts[c] += 1;
+    }
+    let mut out_indptr = vec![0usize; n_cols + 1];
+    for c in 0..n_cols {
+        out_indptr[c + 1] = out_indptr[c] + counts[c];
+    }
+    let nnz = indices.len();
+    let mut out_indices = vec![0usize; nnz];
+    let mut out_data = vec![0.0f64; nnz];
+    let mut pos = out_indptr[..n_cols].to_vec();
+    for r in 0..n_rows {
+        for k in indptr[r]..indptr[r + 1] {
+            let c = indices[k];
+            let dest = pos[c];
+            out_indices[dest] = r;
+            out_data[dest] = data[k];
+            pos[c] += 1;
+        }
+    }
+    (out_indptr, out_indices, out_data)
+}
+
+// Read X as CSR arrays: indptr has n_obs+1 entries, indices holds column
+// indices. A dense X is expanded to a fully-populated CSR; a CSC-stored X is
+// transposed once via counting sort.
+fn read_x_csr(
+    file: &hdf5_metno::File,
+    n_obs: usize,
+    n_var: usize,
+) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    let x_loc = file
+        .loc_type_by_name("X")
+        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+    if x_loc == hdf5_metno::LocationType::Group {
+        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
+        let indptr = read_indptr(file);
+        let nnz = *indptr.last().unwrap_or(&0);
+        let indices = read_indices_slice(file, 0, nnz);
+        let data = read_data_slice(file, 0, nnz);
+        match fmt.as_str() {
+            "csr" => (indptr, indices, data),
+            "csc" => transpose_csr(n_var, n_obs, &indptr, &indices, &data),
+            _ => die(&format!("unknown sparse format: {}", fmt)),
+        }
+    } else {
+        let dense = read_dense_x_full(file);
+        let mut indptr = Vec::with_capacity(n_obs + 1);
+        let mut indices = Vec::with_capacity(n_obs * n_var);
+        let mut data = Vec::with_capacity(n_obs * n_var);
+        for i in 0..n_obs {
+            indptr.push(i * n_var);
+            for j in 0..n_var {
+                indices.push(j);
+                data.push(dense[i * n_var + j]);
+            }
+        }
+        indptr.push(n_obs * n_var);
+        (indptr, indices, data)
+    }
+}
+
+// Read X as CSC arrays: indptr has n_var+1 entries, indices holds row indices.
+// CSC arrays of M are exactly the CSR arrays of M^T, so a CSR-stored X is
+// transposed once; a dense X is expanded column-major.
+fn read_x_csc(
+    file: &hdf5_metno::File,
+    n_obs: usize,
+    n_var: usize,
+) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+    let x_loc = file
+        .loc_type_by_name("X")
+        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+    if x_loc == hdf5_metno::LocationType::Group {
+        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
+        let indptr = read_indptr(file);
+        let nnz = *indptr.last().unwrap_or(&0);
+        let indices = read_indices_slice(file, 0, nnz);
+        let data = read_data_slice(file, 0, nnz);
+        match fmt.as_str() {
+            "csc" => (indptr, indices, data),
+            "csr" => transpose_csr(n_obs, n_var, &indptr, &indices, &data),
+            _ => die(&format!("unknown sparse format: {}", fmt)),
+        }
+    } else {
+        let dense = read_dense_x_full(file);
+        let mut indptr = Vec::with_capacity(n_var + 1);
+        let mut indices = Vec::with_capacity(n_obs * n_var);
+        let mut data = Vec::with_capacity(n_obs * n_var);
+        for j in 0..n_var {
+            indptr.push(j * n_obs);
+            for i in 0..n_obs {
+                indices.push(i);
+                data.push(dense[i * n_var + j]);
+            }
+        }
+        indptr.push(n_var * n_obs);
+        (indptr, indices, data)
+    }
+}
+
+// Export the full X matrix as a NumPy .npz stream holding a single CSR
+// sparse representation: data/indices/indptr/shape. Data is float64; indices
+// and indptr are int64. Works whether X is dense, CSR, or CSC on disk.
+fn export_matrix_csr(file: &hdf5_metno::File) {
+    let n_obs = read_group_index(file, "obs").len();
+    let n_var = read_group_index(file, "var").len();
+    let (indptr, indices, data) = read_x_csr(file, n_obs, n_var);
+    let entries = vec![
+        ZipEntry {
+            name: "csr_data.npy".into(),
+            bytes: npy_f64(&data),
+        },
+        ZipEntry {
+            name: "csr_indices.npy".into(),
+            bytes: npy_i64(&indices),
+        },
+        ZipEntry {
+            name: "csr_indptr.npy".into(),
+            bytes: npy_i64(&indptr),
+        },
+        ZipEntry {
+            name: "csr_shape.npy".into(),
+            bytes: npy_shape2(n_obs, n_var),
+        },
+    ];
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    write_zip(&mut out, &entries);
+}
+
+// Export the full X matrix as a NumPy .npz stream holding a single CSC
+// sparse representation: data/indices/indptr/shape. See export_matrix_csr.
+fn export_matrix_csc(file: &hdf5_metno::File) {
+    let n_obs = read_group_index(file, "obs").len();
+    let n_var = read_group_index(file, "var").len();
+    let (indptr, indices, data) = read_x_csc(file, n_obs, n_var);
+    let entries = vec![
+        ZipEntry {
+            name: "csc_data.npy".into(),
+            bytes: npy_f64(&data),
+        },
+        ZipEntry {
+            name: "csc_indices.npy".into(),
+            bytes: npy_i64(&indices),
+        },
+        ZipEntry {
+            name: "csc_indptr.npy".into(),
+            bytes: npy_i64(&indptr),
+        },
+        ZipEntry {
+            name: "csc_shape.npy".into(),
+            bytes: npy_shape2(n_obs, n_var),
+        },
+    ];
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    write_zip(&mut out, &entries);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1178,7 +1545,9 @@ fn main() {
             .collect();
 
         if export_args.is_empty() {
-            eprintln!("Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum");
+            eprintln!(
+                "Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum|matrix_csr|matrix_csc"
+            );
             eprintln!(
                 "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
             );
@@ -1186,8 +1555,15 @@ fn main() {
         }
         let sub_cmd = export_args[0];
 
-        // obs_index / var_index / obssum / varsum take no <name> argument.
-        let no_name_cmds = ["obs_index", "var_index", "obssum", "varsum"];
+        // obs_index / var_index / obssum / varsum / matrix_csr / matrix_csc take no <name> argument.
+        let no_name_cmds = [
+            "obs_index",
+            "var_index",
+            "obssum",
+            "varsum",
+            "matrix_csr",
+            "matrix_csc",
+        ];
         let needs_name = !no_name_cmds.contains(&sub_cmd);
 
         if needs_name && export_args.len() < 2 {
@@ -1242,9 +1618,11 @@ fn main() {
             "obssum" => export_x_obssum(&file, binary),
             "varsum" => export_x_varsum(&file, binary),
             "obsm" => export_obsm(&file, name, binary),
+            "matrix_csr" => export_matrix_csr(&file),
+            "matrix_csc" => export_matrix_csc(&file),
             _ => {
                 eprintln!(
-                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, obs_encoding, var_encoding, row, column, obssum, varsum, or obsm"
+                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, obs_encoding, var_encoding, row, column, obssum, varsum, obsm, matrix_csr, or matrix_csc"
                 );
                 process::exit(1);
             }
@@ -1257,6 +1635,7 @@ fn main() {
         eprintln!(
             "Usage: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape"
         );
+        eprintln!("       h5ad-inspect <filename> export obs_index|var_index|obssum|varsum|matrix_csr|matrix_csc");
         eprintln!(
             "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
         );
