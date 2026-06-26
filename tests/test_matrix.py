@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import h5py
 import numpy as np
+import scipy.sparse as sp
 import pytest
 
 from conftest import run, to_float_array, to_float_matrix, to_binary_floats
@@ -88,6 +90,43 @@ def test_obsm_binary(h5ad_inspect, files, variant):
     expected = ref.expected_obsm(adata, "X_umap")
     assert got.reshape(expected.shape).shape == expected.shape
     assert np.allclose(got, expected.ravel(), rtol=ELEM_RTOL, atol=ELEM_ATOL), (variant, got, expected.ravel())
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_matrix_cellranger_v3_hdf5(h5ad_inspect, files, variant, tmp_path):
+    """The 10x CellRanger v3 .h5 export is features × barcodes CSC, and its
+    contents round-trip back to AnnData's X with the right names/metadata."""
+    adata, path = files[variant]
+    out = tmp_path / f"{variant}_10x.h5"
+    run(h5ad_inspect, path, "export", "matrix_cellranger_v3_hdf5", str(out))
+
+    dense = np.asarray(adata.X.todense()) if sp.issparse(adata.X) else np.asarray(adata.X)
+
+    with h5py.File(out, "r") as f:
+        m = f["matrix"]
+        shape = m["shape"][:]
+        # 10x is features × barcodes, i.e. the transpose of AnnData's cells × genes.
+        assert shape.tolist() == [adata.n_vars, adata.n_obs]
+        rebuilt = sp.csc_matrix(
+            (m["data"][:], m["indices"][:], m["indptr"][:]), shape=tuple(shape)
+        )
+        got = np.asarray(rebuilt.todense()).T  # back to cells × genes
+        assert np.allclose(got, dense, rtol=ELEM_RTOL, atol=ELEM_ATOL), (variant, got, dense)
+
+        # int32 index slots (the dgCMatrix ceiling), float64 values.
+        assert m["indices"].dtype == np.int32
+        assert m["indptr"].dtype == np.int32
+        assert m["shape"].dtype == np.int32
+
+        barcodes = [b.decode() for b in m["barcodes"][:]]
+        names = [b.decode() for b in m["features/name"][:]]
+        ids = [b.decode() for b in m["features/id"][:]]
+        ftype = {b.decode() for b in m["features/feature_type"][:]}
+        tags = [b.decode() for b in m["features/_all_tag_keys"][:]]
+        assert barcodes == list(map(str, adata.obs_names))
+        assert names == ids == list(map(str, adata.var_names))
+        assert ftype == {"Gene Expression"}
+        assert tags == ["genome"]
 
 
 @pytest.mark.parametrize("variant", VARIANTS)

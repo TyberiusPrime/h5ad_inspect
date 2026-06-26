@@ -56,6 +56,7 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `varsum` | — | sum of X across all obs, one value per var (col sums) |
 | `matrix_csr` | — | full X matrix as a NumPy `.npz` stream in CSR (`data`/`indices`/`indptr`/`shape`); see [Full matrix](#full-matrix-csr--csc-numpy-npz) |
 | `matrix_csc` | — | full X matrix as a NumPy `.npz` stream in CSC (`data`/`indices`/`indptr`/`shape`); see [Full matrix](#full-matrix-csr--csc-numpy-npz) |
+| `matrix_cellranger_v3_hdf5` | output path | full X matrix as a 10x CellRanger v3 `.h5` file, readable by `Seurat::Read10X_h5`; see [10x / Seurat](#10x-cellranger-v3-hdf5-seurat) |
 | `obsm` | key | a 2-D obsm embedding (e.g. `X_pca`, `X_umap`) in obs order; one tab-separated line per obs, `n_components` values per line |
 | `obs_categories` | column name | order of the categories  of this column |
 | `var_categories` | column name | order of the categories  of this column |
@@ -137,6 +138,53 @@ A dense-stored X is emitted as a fully-populated CSR/CSC (every entry kept, so
 `nnz == n_obs * n_var`); a sparse-stored X keeps only its stored nonzeros. The
 on-disk format and the requested format are independent — e.g.
 `export matrix_csc` on a CSR-stored X transposes once to produce CSC.
+
+### 10x CellRanger v3 HDF5 (Seurat)
+
+`export matrix_cellranger_v3_hdf5 <out.h5>` writes the **entire X matrix** as a
+10x Genomics CellRanger v3 `.h5` file — the format `Seurat::Read10X_h5()` reads
+natively, with no Matrix Market text parsing and no Python/`reticulate`. Unlike
+the other matrix exports this one writes to a **file path** you provide (HDF5
+cannot stream to stdout), not to the standard output.
+
+10x stores the matrix as **features × barcodes** (genes as rows, cells as
+columns) in CSC, i.e. the transpose of AnnData's cells × genes `X`. The export
+handles this for you. obs become barcodes (columns), var become features (rows):
+
+| Dataset | dtype | contents |
+|---|---|---|
+| `matrix/data` | float64 | nonzero values |
+| `matrix/indices` | int32 | feature (row) indices, 0-based |
+| `matrix/indptr` | int32 | per-barcode column pointers (`n_obs + 1`) |
+| `matrix/shape` | int32 | `(n_var, n_obs)` = (features, barcodes) |
+| `matrix/barcodes` | string | obs names (column names) |
+| `matrix/features/id` | string | var names (mirrors `name`) |
+| `matrix/features/name` | string | var names (row names) |
+| `matrix/features/feature_type` | string | `"Gene Expression"` for every feature |
+| `matrix/features/genome` | string | empty |
+| `matrix/features/_all_tag_keys` | string | `["genome"]` |
+
+Index slots are int32 (the `dgCMatrix` ceiling); the export errors out if any
+dimension or the nonzero count exceeds 2³¹−1. Works whether X is stored dense,
+CSR, or CSC. There is no separate gene-ID column in an AnnData's `var_names`, so
+`features/id` mirrors `features/name`.
+
+```bash
+h5ad-inspect data.h5ad export matrix_cellranger_v3_hdf5 counts.h5
+```
+
+```r
+library(Seurat)
+
+# Returns a dgCMatrix: rows = genes (var_names), cols = cells (obs_names)
+mat <- Read10X_h5("counts.h5")
+dim(mat)            # n_genes x n_cells
+head(rownames(mat)) # gene names
+head(colnames(mat)) # cell barcodes
+
+# Straight into a Seurat object
+obj <- CreateSeuratObject(counts = mat)
+```
 
 ### Column encoding (`obs_encoding` / `var_encoding`)
 

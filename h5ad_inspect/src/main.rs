@@ -1524,6 +1524,80 @@ fn export_matrix_csc(file: &hdf5_metno::File) {
     write_zip(&mut out, &entries);
 }
 
+// Write a 1-D dataset of a fixed-size H5Type (f64, i32, …) into `group`.
+fn write_h5_1d<T: hdf5_metno::H5Type>(group: &hdf5_metno::Group, name: &str, data: &[T]) {
+    group
+        .new_dataset::<T>()
+        .shape([data.len()])
+        .create(name)
+        .and_then(|ds| ds.write(data))
+        .unwrap_or_else(|e| die(&format!("write {}: {}", name, e)));
+}
+
+// Write a 1-D variable-length UTF-8 string dataset into `group`.
+fn write_h5_strings(group: &hdf5_metno::Group, name: &str, vals: &[String]) {
+    use std::str::FromStr;
+    let conv: Vec<hdf5_metno::types::VarLenUnicode> = vals
+        .iter()
+        .map(|s| {
+            hdf5_metno::types::VarLenUnicode::from_str(s)
+                .unwrap_or_else(|e| die(&format!("{}: bad string {:?}: {}", name, s, e)))
+        })
+        .collect();
+    group
+        .new_dataset::<hdf5_metno::types::VarLenUnicode>()
+        .shape([conv.len()])
+        .create(name)
+        .and_then(|ds| ds.write(&conv[..]))
+        .unwrap_or_else(|e| die(&format!("write {}: {}", name, e)));
+}
+
+// Export X as a 10x CellRanger v3 .h5 file at `out_path`, readable natively by
+// Seurat::Read10X_h5 (no Python/reticulate). 10x stores the matrix as
+// features × barcodes in CSC; that layout is byte-for-byte the CSR arrays of
+// AnnData's (cells × genes) X (per-cell indptr, gene row-indices), so we reuse
+// read_x_csr directly with no extra transpose. obs become barcodes (columns),
+// var become features (rows). Index slots are int32 (the dgCMatrix limit).
+fn export_matrix_cellranger_v3_hdf5(file: &hdf5_metno::File, out_path: &str) {
+    let barcodes = read_group_index(file, "obs");
+    let features = read_group_index(file, "var");
+    let n_obs = barcodes.len();
+    let n_var = features.len();
+
+    let (indptr, indices, data) = read_x_csr(file, n_obs, n_var);
+    let nnz = data.len();
+
+    let max = i32::MAX as usize;
+    if n_obs > max || n_var > max || nnz > max {
+        die("matrix too large for CellRanger v3 (int32) layout: dims/nnz exceed 2^31-1");
+    }
+    let indptr_i32: Vec<i32> = indptr.iter().map(|&v| v as i32).collect();
+    let indices_i32: Vec<i32> = indices.iter().map(|&v| v as i32).collect();
+    let shape_i32: [i32; 2] = [n_var as i32, n_obs as i32]; // (features, barcodes)
+
+    let out = hdf5_metno::File::create(out_path)
+        .unwrap_or_else(|e| die(&format!("create {}: {}", out_path, e)));
+    let matrix = out
+        .create_group("matrix")
+        .unwrap_or_else(|e| die(&format!("create /matrix: {}", e)));
+
+    write_h5_1d(&matrix, "data", &data);
+    write_h5_1d(&matrix, "indices", &indices_i32);
+    write_h5_1d(&matrix, "indptr", &indptr_i32);
+    write_h5_1d(&matrix, "shape", &shape_i32[..]);
+    write_h5_strings(&matrix, "barcodes", &barcodes);
+
+    let feat = matrix
+        .create_group("features")
+        .unwrap_or_else(|e| die(&format!("create /matrix/features: {}", e)));
+    // No separate gene-ID column in AnnData var_names, so id mirrors name.
+    write_h5_strings(&feat, "id", &features);
+    write_h5_strings(&feat, "name", &features);
+    write_h5_strings(&feat, "feature_type", &vec!["Gene Expression".to_string(); n_var]);
+    write_h5_strings(&feat, "genome", &vec![String::new(); n_var]);
+    write_h5_strings(&feat, "_all_tag_keys", &["genome".to_string()]);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1550,6 +1624,9 @@ fn main() {
             );
             eprintln!(
                 "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
+            );
+            eprintln!(
+                "       h5ad-inspect <filename> export matrix_cellranger_v3_hdf5 <out.h5>"
             );
             process::exit(1);
         }
@@ -1620,9 +1697,10 @@ fn main() {
             "obsm" => export_obsm(&file, name, binary),
             "matrix_csr" => export_matrix_csr(&file),
             "matrix_csc" => export_matrix_csc(&file),
+            "matrix_cellranger_v3_hdf5" => export_matrix_cellranger_v3_hdf5(&file, name),
             _ => {
                 eprintln!(
-                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, obs_encoding, var_encoding, row, column, obssum, varsum, obsm, matrix_csr, or matrix_csc"
+                    "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, obs_encoding, var_encoding, row, column, obssum, varsum, obsm, matrix_csr, matrix_csc, or matrix_cellranger_v3_hdf5"
                 );
                 process::exit(1);
             }
