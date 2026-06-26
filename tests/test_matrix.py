@@ -129,6 +129,91 @@ def test_matrix_cellranger_v3_hdf5(h5ad_inspect, files, variant, tmp_path):
         assert tags == ["genome"]
 
 
+def _dense(M):
+    return np.asarray(M.todense()) if sp.issparse(M) else np.asarray(M)
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_layer_row(h5ad_inspect, files, variant):
+    """`--layer counts` reads from layers/counts, not X."""
+    adata, path = files[variant]
+    obs_name = str(adata.obs_names[3])
+    got = to_float_array(run(h5ad_inspect, path, "export", "--layer", "counts", "row", obs_name))
+    expected = _dense(adata.layers["counts"])[3, :].astype(float)
+    assert np.allclose(got, expected, rtol=ELEM_RTOL, atol=ELEM_ATOL), (variant, got, expected)
+    # And it must differ from the X row (sanity: we're really reading the layer).
+    x_row = ref.expected_x_row(adata, obs_name)
+    assert not np.allclose(got, x_row), (variant, "layer row matched X row")
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_layer_column(h5ad_inspect, files, variant):
+    adata, path = files[variant]
+    var_name = str(adata.var_names[5])
+    got = to_float_array(run(h5ad_inspect, path, "export", "--layer", "counts", "column", var_name))
+    expected = _dense(adata.layers["counts"])[:, 5].astype(float)
+    assert np.allclose(got, expected, rtol=ELEM_RTOL, atol=ELEM_ATOL), (variant, got, expected)
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_layer_obssum_varsum(h5ad_inspect, files, variant):
+    adata, path = files[variant]
+    counts = _dense(adata.layers["counts"]).astype(float)
+    obssum = to_float_array(run(h5ad_inspect, path, "export", "--layer", "counts", "obssum"))
+    varsum = to_float_array(run(h5ad_inspect, path, "export", "--layer", "counts", "varsum"))
+    assert np.allclose(obssum, counts.sum(axis=1), rtol=SUM_RTOL, atol=SUM_ATOL), (variant, obssum)
+    assert np.allclose(varsum, counts.sum(axis=0), rtol=SUM_RTOL, atol=SUM_ATOL), (variant, varsum)
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+@pytest.mark.parametrize("fmt", ["csr", "csc"])
+def test_layer_matrix_npz(h5ad_inspect, files, variant, fmt):
+    import io
+
+    adata, path = files[variant]
+    cp = run(h5ad_inspect, path, "export", "--layer", "counts", f"matrix_{fmt}")
+    z = np.load(io.BytesIO(cp.stdout))
+    ctor = sp.csr_matrix if fmt == "csr" else sp.csc_matrix
+    rebuilt = ctor(
+        (z[f"{fmt}_data"], z[f"{fmt}_indices"], z[f"{fmt}_indptr"]),
+        shape=tuple(z[f"{fmt}_shape"]),
+    )
+    expected = _dense(adata.layers["counts"]).astype(float)
+    assert np.allclose(_dense(rebuilt), expected, rtol=ELEM_RTOL, atol=ELEM_ATOL), (variant, fmt)
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_layer_cellranger_v3_hdf5(h5ad_inspect, files, variant, tmp_path):
+    adata, path = files[variant]
+    out = tmp_path / f"{variant}_counts_10x.h5"
+    run(h5ad_inspect, path, "export", "--layer", "counts", "matrix_cellranger_v3_hdf5", str(out))
+    expected = _dense(adata.layers["counts"]).astype(float)
+    with h5py.File(out, "r") as f:
+        m = f["matrix"]
+        shape = m["shape"][:]
+        assert shape.tolist() == [adata.n_vars, adata.n_obs]
+        rebuilt = sp.csc_matrix(
+            (m["data"][:], m["indices"][:], m["indptr"][:]), shape=tuple(shape)
+        )
+        got = np.asarray(rebuilt.todense()).T  # back to cells × genes
+        assert np.allclose(got, expected, rtol=ELEM_RTOL, atol=ELEM_ATOL), (variant, got, expected)
+
+
+def test_layer_rejected_for_non_matrix_subcommand(h5ad_inspect, files):
+    """--layer only applies to matrix subcommands; using it elsewhere errors."""
+    _, path = files["dense"]
+    cp = run(h5ad_inspect, path, "export", "--layer", "counts", "obs", "of64", expect_ok=False)
+    assert cp.returncode != 0
+    assert b"--layer" in cp.stderr
+
+
+def test_layer_missing_errors(h5ad_inspect, files):
+    """A non-existent layer fails cleanly rather than silently reading X."""
+    _, path = files["dense"]
+    cp = run(h5ad_inspect, path, "export", "--layer", "nope", "obssum", expect_ok=False)
+    assert cp.returncode != 0
+
+
 @pytest.mark.parametrize("variant", VARIANTS)
 def test_obssum_binary_matches_text(h5ad_inspect, files, variant):
     _, path = files[variant]

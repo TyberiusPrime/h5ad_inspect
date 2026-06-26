@@ -70,6 +70,9 @@ def build_adata() -> ad.AnnData:
     a = ad.AnnData(X=X, obs=obs, var=var)
     a.obsm["X_pca"] = rng.standard_normal((n_obs, 3)).astype("float32")
     a.obsm["X_umap"] = rng.standard_normal((n_obs, 2))
+    # A layer distinct from X (integer-valued counts) so --layer exports can be
+    # told apart from the default X export. Shares obs/var axes with X.
+    a.layers["counts"] = rng.integers(0, 10, (n_obs, n_var)).astype("float32")
     return a
 
 
@@ -106,16 +109,20 @@ def files(tmp_path_factory):
     out_dir = tmp_path_factory.mktemp("h5ad")
     base = build_adata()
     dense_X = np.asarray(base.X)
+    dense_counts = np.asarray(base.layers["counts"])
 
     variants = {}
     for variant in ("dense", "csr", "csc"):
         a = base.copy()
         if variant == "dense":
             a.X = dense_X.copy()
+            a.layers["counts"] = dense_counts.copy()
         elif variant == "csr":
             a.X = sp.csr_matrix(dense_X)
+            a.layers["counts"] = sp.csr_matrix(dense_counts)
         elif variant == "csc":
             a.X = sp.csc_matrix(dense_X)
+            a.layers["counts"] = sp.csc_matrix(dense_counts)
         path = out_dir / f"{variant}.h5ad"
         a.write_h5ad(path)
         variants[variant] = (a, path)

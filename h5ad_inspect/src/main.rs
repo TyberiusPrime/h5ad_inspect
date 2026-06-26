@@ -692,8 +692,8 @@ fn print_encoding_json(encoding: &str, categories: Option<&[String]>) {
 // X matrix helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn x_sparse_format(file: &hdf5_metno::File) -> Option<String> {
-    let group = file.group("X").ok()?;
+fn x_sparse_format(file: &hdf5_metno::File, x_path: &str) -> Option<String> {
+    let group = file.group(x_path).ok()?;
     for attr_name in &["encoding-type", "h5sparse_format"] {
         if let Ok(attr) = group.attr(attr_name) {
             if let Ok(v) = attr.read_scalar::<hdf5_metno::types::VarLenUnicode>() {
@@ -710,18 +710,19 @@ fn x_sparse_format(file: &hdf5_metno::File) -> Option<String> {
     None
 }
 
-fn read_indptr(file: &hdf5_metno::File) -> Vec<usize> {
+fn read_indptr(file: &hdf5_metno::File, x_path: &str) -> Vec<usize> {
+    let path = format!("{}/indptr", x_path);
     let ds = file
-        .dataset("X/indptr")
-        .unwrap_or_else(|e| die(&format!("X/indptr: {}", e)));
+        .dataset(&path)
+        .unwrap_or_else(|e| die(&format!("{}: {}", path, e)));
     let desc = ds
         .dtype()
         .and_then(|d| d.to_descriptor())
-        .unwrap_or_else(|e| die(&format!("X/indptr dtype: {}", e)));
+        .unwrap_or_else(|e| die(&format!("{} dtype: {}", path, e)));
     macro_rules! read_as_usize {
         ($T:ty) => {
             ds.read_1d::<$T>()
-                .unwrap_or_else(|e| die(&format!("X/indptr read: {}", e)))
+                .unwrap_or_else(|e| die(&format!("{} read: {}", path, e)))
                 .iter()
                 .map(|&v| v as usize)
                 .collect()
@@ -732,22 +733,28 @@ fn read_indptr(file: &hdf5_metno::File) -> Vec<usize> {
         TypeDescriptor::Integer(IntSize::U8) => read_as_usize!(i64),
         TypeDescriptor::Unsigned(IntSize::U4) => read_as_usize!(u32),
         TypeDescriptor::Unsigned(IntSize::U8) => read_as_usize!(u64),
-        _ => die("unsupported X/indptr dtype"),
+        _ => die(&format!("unsupported {} dtype", path)),
     }
 }
 
-fn read_indices_slice(file: &hdf5_metno::File, start: usize, end: usize) -> Vec<usize> {
+fn read_indices_slice(
+    file: &hdf5_metno::File,
+    x_path: &str,
+    start: usize,
+    end: usize,
+) -> Vec<usize> {
+    let path = format!("{}/indices", x_path);
     let ds = file
-        .dataset("X/indices")
-        .unwrap_or_else(|e| die(&format!("X/indices: {}", e)));
+        .dataset(&path)
+        .unwrap_or_else(|e| die(&format!("{}: {}", path, e)));
     let desc = ds
         .dtype()
         .and_then(|d| d.to_descriptor())
-        .unwrap_or_else(|e| die(&format!("X/indices dtype: {}", e)));
+        .unwrap_or_else(|e| die(&format!("{} dtype: {}", path, e)));
     macro_rules! read_slice_usize {
         ($T:ty) => {
             ds.read_slice_1d::<$T, _>(s![start..end])
-                .unwrap_or_else(|e| die(&format!("X/indices read: {}", e)))
+                .unwrap_or_else(|e| die(&format!("{} read: {}", path, e)))
                 .iter()
                 .map(|&v| v as usize)
                 .collect()
@@ -758,22 +765,23 @@ fn read_indices_slice(file: &hdf5_metno::File, start: usize, end: usize) -> Vec<
         TypeDescriptor::Integer(IntSize::U8) => read_slice_usize!(i64),
         TypeDescriptor::Unsigned(IntSize::U4) => read_slice_usize!(u32),
         TypeDescriptor::Unsigned(IntSize::U8) => read_slice_usize!(u64),
-        _ => die("unsupported X/indices dtype"),
+        _ => die(&format!("unsupported {} dtype", path)),
     }
 }
 
-fn read_data_slice(file: &hdf5_metno::File, start: usize, end: usize) -> Vec<f64> {
+fn read_data_slice(file: &hdf5_metno::File, x_path: &str, start: usize, end: usize) -> Vec<f64> {
+    let path = format!("{}/data", x_path);
     let ds = file
-        .dataset("X/data")
-        .unwrap_or_else(|e| die(&format!("X/data: {}", e)));
+        .dataset(&path)
+        .unwrap_or_else(|e| die(&format!("{}: {}", path, e)));
     let desc = ds
         .dtype()
         .and_then(|d| d.to_descriptor())
-        .unwrap_or_else(|e| die(&format!("X/data dtype: {}", e)));
+        .unwrap_or_else(|e| die(&format!("{} dtype: {}", path, e)));
     macro_rules! read_slice_f64 {
         ($T:ty) => {
             ds.read_slice_1d::<$T, _>(s![start..end])
-                .unwrap_or_else(|e| die(&format!("X/data read: {}", e)))
+                .unwrap_or_else(|e| die(&format!("{} read: {}", path, e)))
                 .iter()
                 .map(|&v| v as f64)
                 .collect()
@@ -785,7 +793,7 @@ fn read_data_slice(file: &hdf5_metno::File, start: usize, end: usize) -> Vec<f64
         TypeDescriptor::Integer(IntSize::U4) => read_slice_f64!(i32),
         TypeDescriptor::Integer(IntSize::U8) => read_slice_f64!(i64),
         TypeDescriptor::Unsigned(IntSize::U4) => read_slice_f64!(u32),
-        _ => die("unsupported X/data dtype"),
+        _ => die(&format!("unsupported {} dtype", path)),
     }
 }
 
@@ -805,12 +813,18 @@ fn write_f64_values(vals: &[f64], binary: bool) {
 }
 
 // Export a CSR row: O(nnz_row) efficient
-fn export_x_csr_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize, binary: bool) {
-    let indptr = read_indptr(file);
+fn export_x_csr_row(
+    file: &hdf5_metno::File,
+    x_path: &str,
+    row_idx: usize,
+    n_cols: usize,
+    binary: bool,
+) {
+    let indptr = read_indptr(file, x_path);
     let start = indptr[row_idx];
     let end = indptr[row_idx + 1];
-    let indices = read_indices_slice(file, start, end);
-    let data = read_data_slice(file, start, end);
+    let indices = read_indices_slice(file, x_path, start, end);
+    let data = read_data_slice(file, x_path, start, end);
     let mut vals = vec![0.0f64; n_cols];
     for (k, &col) in indices.iter().enumerate() {
         vals[col] = data[k];
@@ -819,12 +833,18 @@ fn export_x_csr_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize, bina
 }
 
 // Export a CSC column: O(nnz_col) efficient
-fn export_x_csc_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize, binary: bool) {
-    let indptr = read_indptr(file);
+fn export_x_csc_col(
+    file: &hdf5_metno::File,
+    x_path: &str,
+    col_idx: usize,
+    n_rows: usize,
+    binary: bool,
+) {
+    let indptr = read_indptr(file, x_path);
     let start = indptr[col_idx];
     let end = indptr[col_idx + 1];
-    let indices = read_indices_slice(file, start, end);
-    let data = read_data_slice(file, start, end);
+    let indices = read_indices_slice(file, x_path, start, end);
+    let data = read_data_slice(file, x_path, start, end);
     let mut vals = vec![0.0f64; n_rows];
     for (k, &row) in indices.iter().enumerate() {
         vals[row] = data[k];
@@ -833,11 +853,17 @@ fn export_x_csc_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize, bina
 }
 
 // Export a CSR column (suboptimal: scans all rows)
-fn export_x_csr_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize, binary: bool) {
-    let indptr = read_indptr(file);
+fn export_x_csr_col(
+    file: &hdf5_metno::File,
+    x_path: &str,
+    col_idx: usize,
+    n_rows: usize,
+    binary: bool,
+) {
+    let indptr = read_indptr(file, x_path);
     // Read full indices + data — no way to avoid it for CSR column access
-    let indices = read_indices_slice(file, 0, *indptr.last().unwrap_or(&0));
-    let data = read_data_slice(file, 0, *indptr.last().unwrap_or(&0));
+    let indices = read_indices_slice(file, x_path, 0, *indptr.last().unwrap_or(&0));
+    let data = read_data_slice(file, x_path, 0, *indptr.last().unwrap_or(&0));
     let mut vals = vec![0.0f64; n_rows];
     for row in 0..n_rows {
         let start = indptr[row];
@@ -852,25 +878,26 @@ fn export_x_csr_col(file: &hdf5_metno::File, col_idx: usize, n_rows: usize, bina
     write_f64_values(&vals, binary);
 }
 
-fn export_x_obssum(file: &hdf5_metno::File, binary: bool) {
+fn export_x_obssum(file: &hdf5_metno::File, x_path: &str, binary: bool) {
     let n_obs = read_group_index(file, "obs").len();
     let x_loc = file
-        .loc_type_by_name("X")
-        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+        .loc_type_by_name(x_path)
+        .unwrap_or_else(|e| die(&format!("cannot locate {}: {}", x_path, e)));
     if x_loc == hdf5_metno::LocationType::Group {
-        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
-        let indptr = read_indptr(file);
+        let fmt = x_sparse_format(file, x_path)
+            .unwrap_or_else(|| die(&format!("cannot determine {} sparse format", x_path)));
+        let indptr = read_indptr(file, x_path);
         let nnz = *indptr.last().unwrap_or(&0);
         let sums = match fmt.as_str() {
             "csr" => {
-                let data = read_data_slice(file, 0, nnz);
+                let data = read_data_slice(file, x_path, 0, nnz);
                 (0..n_obs)
                     .map(|i| data[indptr[i]..indptr[i + 1]].iter().sum::<f64>())
                     .collect::<Vec<f64>>()
             }
             "csc" => {
-                let data = read_data_slice(file, 0, nnz);
-                let indices = read_indices_slice(file, 0, nnz);
+                let data = read_data_slice(file, x_path, 0, nnz);
+                let indices = read_indices_slice(file, x_path, 0, nnz);
                 let mut sums = vec![0.0f64; n_obs];
                 for (k, &row) in indices.iter().enumerate() {
                     sums[row] += data[k];
@@ -882,12 +909,12 @@ fn export_x_obssum(file: &hdf5_metno::File, binary: bool) {
         write_f64_values(&sums, binary);
     } else {
         let ds = file
-            .dataset("X")
-            .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+            .dataset(x_path)
+            .unwrap_or_else(|e| die(&format!("{} dataset: {}", x_path, e)));
         let desc = ds
             .dtype()
             .and_then(|d| d.to_descriptor())
-            .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
+            .unwrap_or_else(|e| die(&format!("{} dtype: {}", x_path, e)));
         macro_rules! dense_obssum {
             ($T:ty) => {{
                 (0..n_obs)
@@ -912,19 +939,20 @@ fn export_x_obssum(file: &hdf5_metno::File, binary: bool) {
     }
 }
 
-fn export_x_varsum(file: &hdf5_metno::File, binary: bool) {
+fn export_x_varsum(file: &hdf5_metno::File, x_path: &str, binary: bool) {
     let n_var = read_group_index(file, "var").len();
     let x_loc = file
-        .loc_type_by_name("X")
-        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+        .loc_type_by_name(x_path)
+        .unwrap_or_else(|e| die(&format!("cannot locate {}: {}", x_path, e)));
     if x_loc == hdf5_metno::LocationType::Group {
-        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
-        let indptr = read_indptr(file);
+        let fmt = x_sparse_format(file, x_path)
+            .unwrap_or_else(|| die(&format!("cannot determine {} sparse format", x_path)));
+        let indptr = read_indptr(file, x_path);
         let nnz = *indptr.last().unwrap_or(&0);
         let sums = match fmt.as_str() {
             "csr" => {
-                let data = read_data_slice(file, 0, nnz);
-                let indices = read_indices_slice(file, 0, nnz);
+                let data = read_data_slice(file, x_path, 0, nnz);
+                let indices = read_indices_slice(file, x_path, 0, nnz);
                 let mut sums = vec![0.0f64; n_var];
                 for (k, &col) in indices.iter().enumerate() {
                     sums[col] += data[k];
@@ -932,7 +960,7 @@ fn export_x_varsum(file: &hdf5_metno::File, binary: bool) {
                 sums
             }
             "csc" => {
-                let data = read_data_slice(file, 0, nnz);
+                let data = read_data_slice(file, x_path, 0, nnz);
                 (0..n_var)
                     .map(|j| data[indptr[j]..indptr[j + 1]].iter().sum::<f64>())
                     .collect::<Vec<f64>>()
@@ -942,12 +970,12 @@ fn export_x_varsum(file: &hdf5_metno::File, binary: bool) {
         write_f64_values(&sums, binary);
     } else {
         let ds = file
-            .dataset("X")
-            .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+            .dataset(x_path)
+            .unwrap_or_else(|e| die(&format!("{} dataset: {}", x_path, e)));
         let desc = ds
             .dtype()
             .and_then(|d| d.to_descriptor())
-            .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
+            .unwrap_or_else(|e| die(&format!("{} dtype: {}", x_path, e)));
         macro_rules! dense_varsum {
             ($T:ty) => {{
                 (0..n_var)
@@ -973,10 +1001,16 @@ fn export_x_varsum(file: &hdf5_metno::File, binary: bool) {
 }
 
 // Export a CSC row (suboptimal: scans all columns)
-fn export_x_csc_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize, binary: bool) {
-    let indptr = read_indptr(file);
-    let indices = read_indices_slice(file, 0, *indptr.last().unwrap_or(&0));
-    let data = read_data_slice(file, 0, *indptr.last().unwrap_or(&0));
+fn export_x_csc_row(
+    file: &hdf5_metno::File,
+    x_path: &str,
+    row_idx: usize,
+    n_cols: usize,
+    binary: bool,
+) {
+    let indptr = read_indptr(file, x_path);
+    let indices = read_indices_slice(file, x_path, 0, *indptr.last().unwrap_or(&0));
+    let data = read_data_slice(file, x_path, 0, *indptr.last().unwrap_or(&0));
     let mut vals = vec![0.0f64; n_cols];
     for col in 0..n_cols {
         let start = indptr[col];
@@ -991,32 +1025,33 @@ fn export_x_csc_row(file: &hdf5_metno::File, row_idx: usize, n_cols: usize, bina
     write_f64_values(&vals, binary);
 }
 
-fn export_x_row(file: &hdf5_metno::File, obs_idx_val: &str, binary: bool) {
+fn export_x_row(file: &hdf5_metno::File, x_path: &str, obs_idx_val: &str, binary: bool) {
     let obs_index = read_group_index(file, "obs");
     let var_index = read_group_index(file, "var");
     let obs_pos = find_index_position(&obs_index, obs_idx_val);
     let n_var = var_index.len();
 
     let x_loc = file
-        .loc_type_by_name("X")
-        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+        .loc_type_by_name(x_path)
+        .unwrap_or_else(|e| die(&format!("cannot locate {}: {}", x_path, e)));
 
     if x_loc == hdf5_metno::LocationType::Group {
-        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
+        let fmt = x_sparse_format(file, x_path)
+            .unwrap_or_else(|| die(&format!("cannot determine {} sparse format", x_path)));
         match fmt.as_str() {
-            "csr" => export_x_csr_row(file, obs_pos, n_var, binary),
-            "csc" => export_x_csc_row(file, obs_pos, n_var, binary),
+            "csr" => export_x_csr_row(file, x_path, obs_pos, n_var, binary),
+            "csc" => export_x_csc_row(file, x_path, obs_pos, n_var, binary),
             _ => die(&format!("unknown sparse format: {}", fmt)),
         }
     } else {
         // Dense 2-D dataset
         let ds = file
-            .dataset("X")
-            .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+            .dataset(x_path)
+            .unwrap_or_else(|e| die(&format!("{} dataset: {}", x_path, e)));
         let desc = ds
             .dtype()
             .and_then(|d| d.to_descriptor())
-            .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
+            .unwrap_or_else(|e| die(&format!("{} dtype: {}", x_path, e)));
         macro_rules! collect_dense_row {
             ($T:ty) => {
                 ds.read_slice_1d::<$T, _>(s![obs_pos, ..])
@@ -1037,31 +1072,32 @@ fn export_x_row(file: &hdf5_metno::File, obs_idx_val: &str, binary: bool) {
     }
 }
 
-fn export_x_column(file: &hdf5_metno::File, var_idx_val: &str, binary: bool) {
+fn export_x_column(file: &hdf5_metno::File, x_path: &str, var_idx_val: &str, binary: bool) {
     let obs_index = read_group_index(file, "obs");
     let var_index = read_group_index(file, "var");
     let var_pos = find_index_position(&var_index, var_idx_val);
     let n_obs = obs_index.len();
 
     let x_loc = file
-        .loc_type_by_name("X")
-        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+        .loc_type_by_name(x_path)
+        .unwrap_or_else(|e| die(&format!("cannot locate {}: {}", x_path, e)));
 
     if x_loc == hdf5_metno::LocationType::Group {
-        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
+        let fmt = x_sparse_format(file, x_path)
+            .unwrap_or_else(|| die(&format!("cannot determine {} sparse format", x_path)));
         match fmt.as_str() {
-            "csr" => export_x_csr_col(file, var_pos, n_obs, binary),
-            "csc" => export_x_csc_col(file, var_pos, n_obs, binary),
+            "csr" => export_x_csr_col(file, x_path, var_pos, n_obs, binary),
+            "csc" => export_x_csc_col(file, x_path, var_pos, n_obs, binary),
             _ => die(&format!("unknown sparse format: {}", fmt)),
         }
     } else {
         let ds = file
-            .dataset("X")
-            .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+            .dataset(x_path)
+            .unwrap_or_else(|e| die(&format!("{} dataset: {}", x_path, e)));
         let desc = ds
             .dtype()
             .and_then(|d| d.to_descriptor())
-            .unwrap_or_else(|e| die(&format!("X dtype: {}", e)));
+            .unwrap_or_else(|e| die(&format!("{} dtype: {}", x_path, e)));
         macro_rules! collect_dense_col {
             ($T:ty) => {
                 ds.read_slice_1d::<$T, _>(s![.., var_pos])
@@ -1316,13 +1352,13 @@ fn npy_shape2(n_rows: usize, n_cols: usize) -> Vec<u8> {
 }
 
 // Read a dense 2-D X dataset into row-major f64.
-fn read_dense_x_full(file: &hdf5_metno::File) -> Vec<f64> {
+fn read_dense_x_full(file: &hdf5_metno::File, x_path: &str) -> Vec<f64> {
     let ds = file
-        .dataset("X")
-        .unwrap_or_else(|e| die(&format!("X dataset: {}", e)));
+        .dataset(x_path)
+        .unwrap_or_else(|e| die(&format!("{} dataset: {}", x_path, e)));
     let shape = ds.shape();
     if shape.len() != 2 {
-        die("X is not a 2-D dataset");
+        die(&format!("{} is not a 2-D dataset", x_path));
     }
     let (n_obs, n_var) = (shape[0], shape[1]);
     let desc = ds
@@ -1392,25 +1428,27 @@ fn transpose_csr(
 // transposed once via counting sort.
 fn read_x_csr(
     file: &hdf5_metno::File,
+    x_path: &str,
     n_obs: usize,
     n_var: usize,
 ) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
     let x_loc = file
-        .loc_type_by_name("X")
-        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+        .loc_type_by_name(x_path)
+        .unwrap_or_else(|e| die(&format!("cannot locate {}: {}", x_path, e)));
     if x_loc == hdf5_metno::LocationType::Group {
-        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
-        let indptr = read_indptr(file);
+        let fmt = x_sparse_format(file, x_path)
+            .unwrap_or_else(|| die(&format!("cannot determine {} sparse format", x_path)));
+        let indptr = read_indptr(file, x_path);
         let nnz = *indptr.last().unwrap_or(&0);
-        let indices = read_indices_slice(file, 0, nnz);
-        let data = read_data_slice(file, 0, nnz);
+        let indices = read_indices_slice(file, x_path, 0, nnz);
+        let data = read_data_slice(file, x_path, 0, nnz);
         match fmt.as_str() {
             "csr" => (indptr, indices, data),
             "csc" => transpose_csr(n_var, n_obs, &indptr, &indices, &data),
             _ => die(&format!("unknown sparse format: {}", fmt)),
         }
     } else {
-        let dense = read_dense_x_full(file);
+        let dense = read_dense_x_full(file, x_path);
         let mut indptr = Vec::with_capacity(n_obs + 1);
         let mut indices = Vec::with_capacity(n_obs * n_var);
         let mut data = Vec::with_capacity(n_obs * n_var);
@@ -1431,25 +1469,27 @@ fn read_x_csr(
 // transposed once; a dense X is expanded column-major.
 fn read_x_csc(
     file: &hdf5_metno::File,
+    x_path: &str,
     n_obs: usize,
     n_var: usize,
 ) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
     let x_loc = file
-        .loc_type_by_name("X")
-        .unwrap_or_else(|e| die(&format!("cannot locate X: {}", e)));
+        .loc_type_by_name(x_path)
+        .unwrap_or_else(|e| die(&format!("cannot locate {}: {}", x_path, e)));
     if x_loc == hdf5_metno::LocationType::Group {
-        let fmt = x_sparse_format(file).unwrap_or_else(|| die("cannot determine X sparse format"));
-        let indptr = read_indptr(file);
+        let fmt = x_sparse_format(file, x_path)
+            .unwrap_or_else(|| die(&format!("cannot determine {} sparse format", x_path)));
+        let indptr = read_indptr(file, x_path);
         let nnz = *indptr.last().unwrap_or(&0);
-        let indices = read_indices_slice(file, 0, nnz);
-        let data = read_data_slice(file, 0, nnz);
+        let indices = read_indices_slice(file, x_path, 0, nnz);
+        let data = read_data_slice(file, x_path, 0, nnz);
         match fmt.as_str() {
             "csc" => (indptr, indices, data),
             "csr" => transpose_csr(n_obs, n_var, &indptr, &indices, &data),
             _ => die(&format!("unknown sparse format: {}", fmt)),
         }
     } else {
-        let dense = read_dense_x_full(file);
+        let dense = read_dense_x_full(file, x_path);
         let mut indptr = Vec::with_capacity(n_var + 1);
         let mut indices = Vec::with_capacity(n_obs * n_var);
         let mut data = Vec::with_capacity(n_obs * n_var);
@@ -1468,10 +1508,10 @@ fn read_x_csc(
 // Export the full X matrix as a NumPy .npz stream holding a single CSR
 // sparse representation: data/indices/indptr/shape. Data is float64; indices
 // and indptr are int64. Works whether X is dense, CSR, or CSC on disk.
-fn export_matrix_csr(file: &hdf5_metno::File) {
+fn export_matrix_csr(file: &hdf5_metno::File, x_path: &str) {
     let n_obs = read_group_index(file, "obs").len();
     let n_var = read_group_index(file, "var").len();
-    let (indptr, indices, data) = read_x_csr(file, n_obs, n_var);
+    let (indptr, indices, data) = read_x_csr(file, x_path, n_obs, n_var);
     let entries = vec![
         ZipEntry {
             name: "csr_data.npy".into(),
@@ -1497,10 +1537,10 @@ fn export_matrix_csr(file: &hdf5_metno::File) {
 
 // Export the full X matrix as a NumPy .npz stream holding a single CSC
 // sparse representation: data/indices/indptr/shape. See export_matrix_csr.
-fn export_matrix_csc(file: &hdf5_metno::File) {
+fn export_matrix_csc(file: &hdf5_metno::File, x_path: &str) {
     let n_obs = read_group_index(file, "obs").len();
     let n_var = read_group_index(file, "var").len();
-    let (indptr, indices, data) = read_x_csc(file, n_obs, n_var);
+    let (indptr, indices, data) = read_x_csc(file, x_path, n_obs, n_var);
     let entries = vec![
         ZipEntry {
             name: "csc_data.npy".into(),
@@ -1558,13 +1598,13 @@ fn write_h5_strings(group: &hdf5_metno::Group, name: &str, vals: &[String]) {
 // AnnData's (cells × genes) X (per-cell indptr, gene row-indices), so we reuse
 // read_x_csr directly with no extra transpose. obs become barcodes (columns),
 // var become features (rows). Index slots are int32 (the dgCMatrix limit).
-fn export_matrix_cellranger_v3_hdf5(file: &hdf5_metno::File, out_path: &str) {
+fn export_matrix_cellranger_v3_hdf5(file: &hdf5_metno::File, x_path: &str, out_path: &str) {
     let barcodes = read_group_index(file, "obs");
     let features = read_group_index(file, "var");
     let n_obs = barcodes.len();
     let n_var = features.len();
 
-    let (indptr, indices, data) = read_x_csr(file, n_obs, n_var);
+    let (indptr, indices, data) = read_x_csr(file, x_path, n_obs, n_var);
     let nnz = data.len();
 
     let max = i32::MAX as usize;
@@ -1610,13 +1650,29 @@ fn main() {
     if let Some(export_pos) = args[1..].iter().position(|a| a == "export") {
         let export_pos = export_pos + 1; // index into args
 
-        // Strip --binary from the remaining args after "export".
-        let binary = args[export_pos + 1..].iter().any(|a| a == "--binary");
-        let export_args: Vec<&str> = args[export_pos + 1..]
-            .iter()
-            .filter(|a| a.as_str() != "--binary")
-            .map(|a| a.as_str())
-            .collect();
+        // Parse flags from the args after "export". --binary is a bare flag;
+        // --layer <name> (or --layer=<name>) selects a matrix source under
+        // /layers/<name> instead of /X for the matrix subcommands.
+        let mut binary = false;
+        let mut layer: Option<String> = None;
+        let mut export_args: Vec<&str> = Vec::new();
+        let mut rest = args[export_pos + 1..].iter();
+        while let Some(a) = rest.next() {
+            match a.as_str() {
+                "--binary" => binary = true,
+                "--layer" => {
+                    let v = rest.next().unwrap_or_else(|| {
+                        eprintln!("Error: --layer requires a layer name");
+                        process::exit(1);
+                    });
+                    layer = Some(v.clone());
+                }
+                s if s.starts_with("--layer=") => {
+                    layer = Some(s["--layer=".len()..].to_string());
+                }
+                s => export_args.push(s),
+            }
+        }
 
         if export_args.is_empty() {
             eprintln!(
@@ -1627,6 +1683,9 @@ fn main() {
             );
             eprintln!(
                 "       h5ad-inspect <filename> export matrix_cellranger_v3_hdf5 <out.h5>"
+            );
+            eprintln!(
+                "       --layer <name> targets layers/<name> instead of X (row, column, obssum, varsum, matrix_*)"
             );
             process::exit(1);
         }
@@ -1649,6 +1708,28 @@ fn main() {
         }
 
         let name = if needs_name { export_args[1] } else { "" };
+
+        // --layer only applies to the matrix subcommands (those that read X).
+        // Layers share obs/var axes with X, so only the matrix source changes.
+        let layer_cmds = [
+            "row",
+            "column",
+            "obssum",
+            "varsum",
+            "matrix_csr",
+            "matrix_csc",
+            "matrix_cellranger_v3_hdf5",
+        ];
+        if layer.is_some() && !layer_cmds.contains(&sub_cmd) {
+            eprintln!(
+                "Error: --layer only applies to row, column, obssum, varsum, matrix_csr, matrix_csc, and matrix_cellranger_v3_hdf5"
+            );
+            process::exit(1);
+        }
+        let x_path: String = match &layer {
+            Some(l) => format!("layers/{}", l),
+            None => "X".to_string(),
+        };
 
         // filename is the arg in args[1..] before "export" (or after the export block).
         // Since --binary has been stripped, find the first arg before export_pos that
@@ -1690,14 +1771,14 @@ fn main() {
                 let (enc, cats) = col_encoding(&file, "var", name);
                 print_encoding_json(&enc, cats.as_deref());
             }
-            "row" => export_x_row(&file, name, binary),
-            "column" => export_x_column(&file, name, binary),
-            "obssum" => export_x_obssum(&file, binary),
-            "varsum" => export_x_varsum(&file, binary),
+            "row" => export_x_row(&file, &x_path, name, binary),
+            "column" => export_x_column(&file, &x_path, name, binary),
+            "obssum" => export_x_obssum(&file, &x_path, binary),
+            "varsum" => export_x_varsum(&file, &x_path, binary),
             "obsm" => export_obsm(&file, name, binary),
-            "matrix_csr" => export_matrix_csr(&file),
-            "matrix_csc" => export_matrix_csc(&file),
-            "matrix_cellranger_v3_hdf5" => export_matrix_cellranger_v3_hdf5(&file, name),
+            "matrix_csr" => export_matrix_csr(&file, &x_path),
+            "matrix_csc" => export_matrix_csc(&file, &x_path),
+            "matrix_cellranger_v3_hdf5" => export_matrix_cellranger_v3_hdf5(&file, &x_path, name),
             _ => {
                 eprintln!(
                     "Error: export subcommand must be obs_index, var_index, obs, var, obs_categories, var_categories, obs_encoding, var_encoding, row, column, obssum, varsum, obsm, matrix_csr, matrix_csc, or matrix_cellranger_v3_hdf5"

@@ -12,7 +12,7 @@ cargo install --path .
 
 ```
 h5ad-inspect <filename> <section>
-h5ad-inspect <filename> export [--binary] <subcommand> [<name>]
+h5ad-inspect <filename> export [--binary] [--layer <name>] <subcommand> [<name>]
 ```
 
 ---
@@ -185,6 +185,33 @@ head(colnames(mat)) # cell barcodes
 # Straight into a Seurat object
 obj <- CreateSeuratObject(counts = mat)
 ```
+
+### Layers (`--layer`)
+
+By default the matrix subcommands read `X`. Pass `--layer <name>` to read from
+`layers/<name>` instead — e.g. a `"counts"` layer holding the raw integer counts
+behind a normalised `X`. Layers share the obs/var axes (and therefore the cell
+and gene names) with `X`, so only the matrix source changes; cell/gene lookups,
+sums, and the full-matrix exports all behave exactly as they do for `X`:
+
+```bash
+h5ad-inspect data.h5ad export --layer counts row AAACCTGAGAAGGCCT-1
+h5ad-inspect data.h5ad export --layer counts column GAPDH
+h5ad-inspect data.h5ad export --layer counts obssum
+h5ad-inspect data.h5ad export --layer counts matrix_csr > counts_csr.npz
+h5ad-inspect data.h5ad export --layer counts matrix_cellranger_v3_hdf5 counts.h5
+```
+
+`--layer` applies only to the matrix subcommands (`row`, `column`, `obssum`,
+`varsum`, `matrix_csr`, `matrix_csc`, `matrix_cellranger_v3_hdf5`); combining it
+with any other subcommand is an error. List the available layer names with
+`h5ad-inspect data.h5ad layers`.
+
+> **Note on `.raw`.** AnnData's `.raw` is *not* exposed here. Unlike a layer,
+> `.raw` carries its **own** `var` / `var_names` (usually a larger, pre-filtering
+> gene set), so it isn't a drop-in alternate matrix on the same axes. If you need
+> the raw counts, keep them in a layer (same gene set as `X`) or as a separate
+> object.
 
 ### Column encoding (`obs_encoding` / `var_encoding`)
 
