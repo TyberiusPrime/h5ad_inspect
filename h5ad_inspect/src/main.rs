@@ -1641,6 +1641,21 @@ fn export_matrix_cellranger_v3_hdf5(file: &hdf5_metno::File, x_path: &str, out_p
 // ──────────────────────────────────────────────────────────────────────────────
 // main
 // ──────────────────────────────────────────────────────────────────────────────
+//
+fn print_usage() {
+    eprintln!(
+        "Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum|matrix_csr|matrix_csc"
+    );
+    eprintln!(
+        "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
+    );
+    eprintln!(
+        "       h5ad-inspect <filename> export matrix_cellranger_v3_hdf5 <out.h5>"
+    );
+    eprintln!(
+        "       --layer <name> targets layers/<name> instead of X (row, column, obssum, varsum, matrix_*)"
+    );
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -1675,18 +1690,7 @@ fn main() {
         }
 
         if export_args.is_empty() {
-            eprintln!(
-                "Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum|matrix_csr|matrix_csc"
-            );
-            eprintln!(
-                "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
-            );
-            eprintln!(
-                "       h5ad-inspect <filename> export matrix_cellranger_v3_hdf5 <out.h5>"
-            );
-            eprintln!(
-                "       --layer <name> targets layers/<name> instead of X (row, column, obssum, varsum, matrix_*)"
-            );
+            print_usage();
             process::exit(1);
         }
         let sub_cmd = export_args[0];
@@ -1791,13 +1795,7 @@ fn main() {
 
     // Original inspect mode: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape
     if args.len() != 3 {
-        eprintln!(
-            "Usage: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape"
-        );
-        eprintln!("       h5ad-inspect <filename> export obs_index|var_index|obssum|varsum|matrix_csr|matrix_csc");
-        eprintln!(
-            "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
-        );
+        print_usage();
         process::exit(1);
     }
 
