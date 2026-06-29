@@ -24,7 +24,7 @@ end
 # True when neither a section keyword nor "export" has been given yet.
 function __h5ad_needs_section
     set -l toks (commandline -opc)
-    for kw in obs var uns obsm layers obs_index var_index shape export
+    for kw in obs var uns obsm layers shape export
         contains -- $kw $toks; and return 1
     end
     return 0
@@ -35,17 +35,31 @@ function __h5ad_has_export
     contains -- export (commandline -opc)
 end
 
-# Print the token immediately following "export" (the sub-command), if any.
+# Print the sub-command following "export" — the first non-flag token after it,
+# skipping flags such as --binary / --include-index / --layer <name>.
 function __h5ad_export_subcmd
     set -l toks (commandline -opc)
-    set -l take_next 0
+    set -l seen_export 0
+    set -l skip_next 0
     for tok in $toks
-        if test $take_next -eq 1
+        if test $skip_next -eq 1
+            set skip_next 0
+            continue
+        end
+        if test $seen_export -eq 1
+            # --layer takes a value as the following token.
+            if test "$tok" = --layer
+                set skip_next 1
+                continue
+            end
+            if string match -q -- '-*' $tok
+                continue
+            end
             echo $tok
             return 0
         end
         if test "$tok" = export
-            set take_next 1
+            set seen_export 1
         end
     end
     return 1
@@ -81,13 +95,20 @@ complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
 complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
     -a layers    -d 'List layer names'
 complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
-    -a obs_index -d 'Show obs index (sorted)'
-complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
-    -a var_index -d 'Show var index (sorted)'
-complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
     -a shape     -d 'Show n_obs and n_var (cells and genes)'
 complete -c h5ad-inspect -n '__h5ad_has_file; and __h5ad_needs_section' -f \
     -a export    -d 'Export values to stdout'
+
+# Inspect-mode flag: sort the listed keys alphabetically (default is file order).
+complete -c h5ad-inspect -n '__h5ad_has_file; and not __h5ad_has_export' -f \
+    -l sorted    -d 'Sort listed keys alphabetically'
+
+# ── export flags ──────────────────────────────────────────────────────────────
+
+complete -c h5ad-inspect -n '__h5ad_has_export' -f \
+    -l include-index -d 'Prefix obs/var values with their index (cell/gene ID)'
+complete -c h5ad-inspect -n '__h5ad_has_export' -f \
+    -l binary    -d 'Emit numeric output as raw little-endian f64'
 
 # ── export sub-commands ───────────────────────────────────────────────────────
 
@@ -141,9 +162,9 @@ complete -c h5ad-inspect \
 # After "export row": complete obs index values (cell IDs) from the file.
 complete -c h5ad-inspect \
     -n 'set -l __sc (__h5ad_export_subcmd 2>/dev/null); test "$__sc" = row' -f \
-    -a '(__h5ad_run obs_index)'
+    -a '(__h5ad_run export obs_index)'
 
 # After "export column": complete var index values (gene/feature IDs) from the file.
 complete -c h5ad-inspect \
     -n 'set -l __sc (__h5ad_export_subcmd 2>/dev/null); test "$__sc" = column' -f \
-    -a '(__h5ad_run var_index)'
+    -a '(__h5ad_run export var_index)'

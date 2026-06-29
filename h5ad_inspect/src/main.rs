@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::ffi::CString;
 use std::io::Write;
@@ -115,21 +114,27 @@ fn dataset_values(ds: &hdf5_metno::Dataset) -> StringIter {
     }
 }
 
-// Stream values through: print directly, or count and print sorted by frequency.
-fn output_iter(iter: impl Iterator<Item = String>, value_count: bool) {
-    if !value_count {
-        for v in iter {
+// Print obs/var column values, one per line. With `include_index`, each line is
+// prefixed with the matching index value (cell/gene ID) and a tab, so the output
+// can be grepped/filtered by ID. Values are kept even if the index is shorter
+// (a malformed file): the ID column is then left empty.
+fn output_column(
+    file: &hdf5_metno::File,
+    group_name: &str,
+    values: impl Iterator<Item = String>,
+    include_index: bool,
+) {
+    if !include_index {
+        for v in values {
             println!("{}", v);
         }
-    } else {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for v in iter {
-            *counts.entry(v).or_insert(0) += 1;
-        }
-        let mut pairs: Vec<(String, usize)> = counts.into_iter().collect();
-        pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        for (v, c) in pairs {
-            println!("{}\t{}", v, c);
+        return;
+    }
+    let mut index = read_group_index(file, group_name).into_iter();
+    for v in values {
+        match index.next() {
+            Some(id) => println!("{}\t{}", id, v),
+            None => println!("\t{}", v),
         }
     }
 }
@@ -496,13 +501,21 @@ fn export_obs_var_categories(file: &hdf5_metno::File, group_name: &str, col_name
     }
 }
 
-fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &str) {
+fn export_obs_var_column(
+    file: &hdf5_metno::File,
+    group_name: &str,
+    col_name: &str,
+    include_index: bool,
+) {
     let loc_type = file
         .loc_type_by_name(group_name)
         .unwrap_or_else(|e| die(&format!("cannot locate '{}': {}", group_name, e)));
 
     if loc_type != hdf5_metno::LocationType::Group {
         // Old-style: obs/var is a single compound dataset.
+        if include_index {
+            die("--include-index is not supported for legacy compound obs/var datasets");
+        }
         let ds = file
             .dataset(group_name)
             .unwrap_or_else(|e| die(&format!("cannot open '{}': {}", group_name, e)));
@@ -537,9 +550,11 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
                     col_name
                 ))
             });
-            output_iter(
+            output_column(
+                file,
+                group_name,
                 collect_categorical(&codes_ds, &categories).into_iter(),
-                false,
+                include_index,
             );
             return;
         }
@@ -547,9 +562,11 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
         // Nullable column (integer/string/boolean): values + mask.
         if let Ok(values_ds) = file.dataset(&values_path) {
             let mask = file.dataset(&mask_path).ok().map(|m| read_bool_mask(&m));
-            output_iter(
+            output_column(
+                file,
+                group_name,
                 apply_mask(collect_dataset_values(&values_ds), mask).into_iter(),
-                false,
+                include_index,
             );
             return;
         }
@@ -569,9 +586,14 @@ fn export_obs_var_column(file: &hdf5_metno::File, group_name: &str, col_name: &s
     let cats_path_old = format!("{}/__categories/{}", group_name, col_name);
     if let Ok(cats_ds) = file.dataset(&cats_path_old) {
         let categories = read_string_dataset(&cats_ds);
-        output_iter(collect_categorical(&col_ds, &categories).into_iter(), false);
+        output_column(
+            file,
+            group_name,
+            collect_categorical(&col_ds, &categories).into_iter(),
+            include_index,
+        );
     } else {
-        output_iter(dataset_values(&col_ds), false);
+        output_column(file, group_name, dataset_values(&col_ds), include_index);
     }
 }
 
@@ -1647,13 +1669,19 @@ fn print_usage() {
         "Usage: h5ad-inspect <filename> export obs_index|var_index|obssum|varsum|matrix_csr|matrix_csc"
     );
     eprintln!(
-        "       h5ad-inspect <filename> export [--binary] obs|var|row|column|obsm <name>"
+        "       h5ad-inspect <filename> export [--binary] [--include-index] obs|var|row|column|obsm <name>"
+    );
+    eprintln!(
+        "       --include-index prefixes each obs/var value with its index (cell/gene ID), tab-separated"
     );
     eprintln!(
         "       h5ad-inspect <filename> export matrix_cellranger_v3_hdf5 <out.h5>"
     );
     eprintln!(
         "       --layer <name> targets layers/<name> instead of X (row, column, obssum, varsum, matrix_*)"
+    );
+    eprintln!(
+        "       h5ad-inspect <filename> [--sorted] obs|var|uns|obsm|layers|shape  (inspect; --sorted sorts keys, default is file order)"
     );
 }
 
@@ -1669,12 +1697,14 @@ fn main() {
         // --layer <name> (or --layer=<name>) selects a matrix source under
         // /layers/<name> instead of /X for the matrix subcommands.
         let mut binary = false;
+        let mut include_index = false;
         let mut layer: Option<String> = None;
         let mut export_args: Vec<&str> = Vec::new();
         let mut rest = args[export_pos + 1..].iter();
         while let Some(a) = rest.next() {
             match a.as_str() {
                 "--binary" => binary = true,
+                "--include-index" => include_index = true,
                 "--layer" => {
                     let v = rest.next().unwrap_or_else(|| {
                         eprintln!("Error: --layer requires a layer name");
@@ -1730,6 +1760,12 @@ fn main() {
             );
             process::exit(1);
         }
+
+        // --include-index prefixes each value with its obs/var index (cell/gene ID).
+        if include_index && sub_cmd != "obs" && sub_cmd != "var" {
+            eprintln!("Error: --include-index only applies to the obs and var subcommands");
+            process::exit(1);
+        }
         let x_path: String = match &layer {
             Some(l) => format!("layers/{}", l),
             None => "X".to_string(),
@@ -1763,8 +1799,8 @@ fn main() {
                     println!("{}", v);
                 }
             }
-            "obs" => export_obs_var_column(&file, "obs", name),
-            "var" => export_obs_var_column(&file, "var", name),
+            "obs" => export_obs_var_column(&file, "obs", name, include_index),
+            "var" => export_obs_var_column(&file, "var", name, include_index),
             "obs_categories" => export_obs_var_categories(&file, "obs", name),
             "var_categories" => export_obs_var_categories(&file, "var", name),
             "obs_encoding" => {
@@ -1793,33 +1829,30 @@ fn main() {
         return;
     }
 
-    // Original inspect mode: h5ad-inspect <filename> obs|var|uns|obsm|layers|obs_index|var_index|shape
-    if args.len() != 3 {
+    // Original inspect mode: h5ad-inspect <filename> [--sorted] obs|var|uns|obsm|layers|shape
+    // --sorted sorts the listed keys alphabetically; the default is file order.
+    let mut sorted = false;
+    let mut positionals: Vec<&str> = Vec::new();
+    for a in &args[1..] {
+        match a.as_str() {
+            "--sorted" => sorted = true,
+            s => positionals.push(s),
+        }
+    }
+    if positionals.len() != 2 {
         print_usage();
         process::exit(1);
     }
 
-    let sections = [
-        "obs",
-        "var",
-        "uns",
-        "obsm",
-        "layers",
-        "obs_index",
-        "var_index",
-        "shape",
-    ];
-    let section_arg = args[1..].iter().find(|a| sections.contains(&a.as_str()));
-    let section = match section_arg {
-        Some(s) => s.as_str(),
+    let sections = ["obs", "var", "uns", "obsm", "layers", "shape"];
+    let section = match positionals.iter().find(|a| sections.contains(a)) {
+        Some(s) => *s,
         None => {
-            eprintln!(
-                "Error: section must be one of obs, var, uns, obsm, layers, obs_index, var_index"
-            );
+            eprintln!("Error: section must be one of obs, var, uns, obsm, layers, shape");
             process::exit(1);
         }
     };
-    let filename = args[1..].iter().find(|a| a.as_str() != section).unwrap();
+    let filename = positionals.iter().find(|a| **a != section).unwrap();
 
     let file = match hdf5_metno::File::open(filename) {
         Ok(f) => f,
@@ -1865,7 +1898,9 @@ fn main() {
                     };
                     names.retain(|n| n != &index_name && n != "__categories");
                 }
-                names.sort_unstable();
+                if sorted {
+                    names.sort_unstable();
+                }
                 for name in names {
                     println!("{}", name);
                 }
@@ -1899,7 +1934,9 @@ fn main() {
                             .map(|f| f.name.clone())
                             .filter(|n| n != "index")
                             .collect();
-                        names.sort_unstable();
+                        if sorted {
+                            names.sort_unstable();
+                        }
                         for name in names {
                             println!("{}", name);
                         }
@@ -1911,74 +1948,6 @@ fn main() {
                 }
             }
         }
-        "obs_index" | "var_index" => {
-            let group_name = if section == "obs_index" { "obs" } else { "var" };
-            let loc_type = match file.loc_type_by_name(group_name) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("Error: cannot locate '{}': {}", group_name, e);
-                    process::exit(1);
-                }
-            };
-            if loc_type == hdf5_metno::LocationType::Group {
-                let group = match file.group(group_name) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        eprintln!("Error opening group '{}': {}", group_name, e);
-                        process::exit(1);
-                    }
-                };
-                let index_name = match group.attr("_index") {
-                    Ok(attr) => match attr.read_scalar::<hdf5_metno::types::VarLenUnicode>() {
-                        Ok(v) => v.as_str().to_string(),
-                        Err(_) => "_index".to_string(),
-                    },
-                    Err(_) => "_index".to_string(),
-                };
-                let ds = match file.dataset(&format!("{}/{}", group_name, index_name)) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Error: {}/{}: {}", group_name, index_name, e);
-                        process::exit(1);
-                    }
-                };
-                let arr = match ds.read_1d::<hdf5_metno::types::VarLenUnicode>() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        eprintln!("Error reading {group_name}/{index_name}: {e}");
-                        process::exit(1);
-                    }
-                };
-                let mut values: Vec<&str> = arr.iter().map(|v| v.as_str()).collect();
-                values.sort_unstable();
-                for v in values {
-                    println!("{}", v);
-                }
-            } else {
-                let ds = match file.dataset(group_name) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Error: dataset '{}' not found: {}", group_name, e);
-                        process::exit(1);
-                    }
-                };
-                let arr = match ds.read_1d::<CompoundIndex>() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        eprintln!("Error reading compound index '{}': {}", group_name, e);
-                        process::exit(1);
-                    }
-                };
-                let mut values: Vec<String> = arr
-                    .iter()
-                    .map(|row| row.index.as_str().to_string())
-                    .collect();
-                values.sort_unstable();
-                for v in values {
-                    println!("{}", v);
-                }
-            }
-        }
         "shape" => {
             let n_obs = read_group_index(&file, "obs").len();
             let n_var = read_group_index(&file, "var").len();
@@ -1987,7 +1956,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "Error: section must be one of obs, var, uns, obsm, layers, obs_index, var_index, shape"
+                "Error: section must be one of obs, var, uns, obsm, layers, shape"
             );
             process::exit(1);
         }

@@ -21,16 +21,20 @@ h5ad-inspect <filename> export [--binary] [--layer <name>] <subcommand> [<name>]
 
 Lists the available keys/columns in a section of the file.
 
+Keys are listed in file order. Pass `--sorted` to sort them alphabetically.
+
 ```bash
-h5ad-inspect data.h5ad obs         # list obs column names
-h5ad-inspect data.h5ad var         # list var column names
-h5ad-inspect data.h5ad uns         # list uns keys
-h5ad-inspect data.h5ad obsm        # list obsm keys
-h5ad-inspect data.h5ad layers      # list layer names
-h5ad-inspect data.h5ad obs_index   # list obs index values (sorted, use 'export obs_index' for original order)
-h5ad-inspect data.h5ad var_index   # list var index values (sorted, use 'export var_index' for original order)
-h5ad-inspect data.h5ad shape       # print n_obs and n_var (number of cells and genes)
+h5ad-inspect data.h5ad obs            # list obs column names
+h5ad-inspect data.h5ad var            # list var column names
+h5ad-inspect data.h5ad uns            # list uns keys
+h5ad-inspect data.h5ad obsm           # list obsm keys
+h5ad-inspect data.h5ad layers         # list layer names
+h5ad-inspect data.h5ad --sorted obs   # same, but sorted alphabetically
+h5ad-inspect data.h5ad shape          # print n_obs and n_var (number of cells and genes)
 ```
+
+The index values live in `export obs_index` / `export var_index`, which always
+emit them in file order (the row/column order of the matrix).
 
 ---
 
@@ -64,9 +68,18 @@ h5ad-inspect <filename> export <subcommand> [<name>]
 | `var_encoding` | column name | JSON object with the column's h5ad encoding (`categorical`, `bool`, or `numeric`); `categorical` columns also include an in-order `categories` array |
 Categorical columns are decoded to their string labels.
 
+### Flags
+
+- `--include-index` (obs/var only): prefix each value with its index value (cell/gene ID) and a tab, so the output is greppable by ID. Not supported for legacy compound obs/var datasets.
+- `--binary`: emit numeric output as raw little-endian f64.
+- `--layer <name>`: read from `layers/<name>` instead of `X` (matrix subcommands only).
+
 ```bash
 # Export a single obs column
 h5ad-inspect data.h5ad export obs cell_type
+
+# Same, but tab-prefixed with the cell ID so you can grep for a value
+h5ad-inspect data.h5ad export --include-index obs cell_type | grep -P '\tepithelial$'
 
 # Export the X row for a specific cell (one float per gene, newline-separated)
 h5ad-inspect data.h5ad export row AAACCTGAGAAGGCCT-1
