@@ -1686,6 +1686,25 @@ fn print_usage() {
 }
 
 fn main() {
+    // When stdout is closed by a downstream consumer (e.g. `head`), Rust's
+    // libstd ignores SIGPIPE and instead lets the write fail, which causes
+    // `println!` to panic. Intercept that panic and exit cleanly instead.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let is_broken_pipe = info
+            .payload()
+            .downcast_ref::<String>()
+            .is_some_and(|s| s.contains("Broken pipe"))
+            || info
+                .payload()
+                .downcast_ref::<&str>()
+                .is_some_and(|s| s.contains("Broken pipe"));
+        if !is_broken_pipe {
+            default_hook(info);
+        }
+        process::exit(0);
+    }));
+
     let args: Vec<String> = env::args().collect();
 
     // Export subcommand: h5ad-inspect <filename> export obs|var|row|column <name>

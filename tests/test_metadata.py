@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from conftest import run, text_lines
@@ -83,3 +85,29 @@ def test_inspect_uns_keys(h5ad_inspect, files):
     adata, path = files["dense"]
     got = text_lines(run(h5ad_inspect, path, "uns"))
     assert set(got) == set(adata.uns.keys())
+
+
+def test_broken_pipe(h5ad_inspect, files):
+    """Piping output to `head` must not produce a panic message on stderr.
+
+    Simulates `h5ad-inspect ... | head -2` by reading only two lines then
+    closing the read end of stdout, which sends SIGPIPE (or an EPIPE error)
+    to the child.
+    """
+    adata, path = files["dense"]
+    n_head = 2
+    p = subprocess.Popen(
+        [h5ad_inspect, str(path), "export", "obs_index"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    lines = []
+    for _ in range(n_head):
+        line = p.stdout.readline()
+        if not line:
+            break
+        lines.append(line.decode().rstrip("\n"))
+    p.stdout.close()
+    _, stderr = p.communicate(timeout=10)
+    assert b"panicked" not in stderr, f"panic on broken pipe: {stderr.decode()!r}"
+    assert lines == list(adata.obs_names)[:n_head]
